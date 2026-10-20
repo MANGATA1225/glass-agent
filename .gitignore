@@ -1,6 +1,4 @@
-__pycache__/
-*.py[cod]
-.venv/
+node_modules/
+.glass-agent/
 .env
 .env.*
-.glass-agent/
