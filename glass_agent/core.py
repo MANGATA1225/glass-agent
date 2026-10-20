@@ -87,9 +87,7 @@ class Agent:
     ) -> None:
         if max_steps < 1 or max_tool_output < 1 or context_budget < 1000:
             raise ValueError("max_steps and max_tool_output must be positive; context_budget must be at least 1000")
-        names = [tool.name for tool in tools]
-        if len(names) != len(set(names)):
-            raise ValueError("tool names must be unique")
+        self._validate_tools(tools)
         self.model = model
         self.tools = {tool.name: tool for tool in tools}
         self.system_prompt = system_prompt
@@ -100,6 +98,18 @@ class Agent:
         self.history: List[Dict[str, Any]] = []
         self.summary = ""
         self.first_kept_index = 0
+
+    @staticmethod
+    def _validate_tools(tools: List[Tool]) -> None:
+        # The model-facing registry is deliberately closed: only workspace_tools()
+        # may supply executable tools. Custom callables could write files or run Bash.
+        from .tools import is_workspace_read_tool
+
+        names = [tool.name for tool in tools]
+        if len(names) != len(set(names)):
+            raise ValueError("tool names must be unique")
+        if any(not is_workspace_read_tool(tool) for tool in tools):
+            raise ValueError("only built-in read-only workspace tools are allowed")
 
     def _context(self, working: List[Dict[str, Any]], declarations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         def projected() -> List[Dict[str, Any]]:
@@ -168,6 +178,7 @@ class Agent:
     def run(self, prompt: str) -> str:
         if not prompt.strip():
             raise ValueError("prompt must not be empty")
+        self._validate_tools(list(self.tools.values()))
         working = self.history + [{"role": "user", "content": prompt}]
         declarations = [tool.declaration() for tool in self.tools.values()]
         for step in range(self.max_steps):
@@ -210,6 +221,9 @@ class Agent:
         tool = self.tools.get(name)
         if tool is None:
             return "Tool error: unknown tool: " + name
+        from .tools import is_workspace_read_tool
+        if not is_workspace_read_tool(tool):
+            return "Tool error: this tool is not allowed"
         try:
             arguments = _validate_arguments(tool.parameters, json.loads(raw_arguments))
             value = tool.execute(arguments)

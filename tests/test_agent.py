@@ -19,28 +19,28 @@ class SequenceModel:
         return next(self.responses)
 
 
-def tool_call(arguments='{"text":"hello"}'):
+def tool_call(arguments='{"path":"notes.txt"}', name="read_file"):
     return {
         "id": "call_1",
         "type": "function",
-        "function": {"name": "echo", "arguments": arguments},
+        "function": {"name": name, "arguments": arguments},
     }
 
 
 class AgentTests(unittest.TestCase):
     def setUp(self):
-        self.tool = Tool(
-            "echo", "Echo text",
-            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False},
-            lambda args: args["text"],
-        )
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / "notes.txt").write_text("hello", encoding="utf-8")
+        self.tools = workspace_tools(self.root)
 
     def test_tool_round_trip_and_history(self):
         model = SequenceModel([
             Completion({"content": None, "tool_calls": [tool_call()]}, "tool_calls"),
             Completion({"content": "hello"}, "stop"),
         ])
-        agent = Agent(model, [self.tool])
+        agent = Agent(model, self.tools)
         self.assertEqual(agent.run("Say hello"), "hello")
         second_request = model.requests[1][0]
         self.assertEqual(second_request[-2]["tool_calls"][0]["id"], "call_1")
@@ -49,30 +49,40 @@ class AgentTests(unittest.TestCase):
 
     def test_bad_arguments_return_tool_error(self):
         model = SequenceModel([
-            Completion({"content": None, "tool_calls": [tool_call('{"text":42}')]}, "tool_calls"),
+            Completion({"content": None, "tool_calls": [tool_call('{"path":42}')]}, "tool_calls"),
             Completion({"content": "Recovered"}, "stop"),
         ])
-        agent = Agent(model, [self.tool])
+        agent = Agent(model, self.tools)
         self.assertEqual(agent.run("test"), "Recovered")
         self.assertIn("invalid type", model.requests[1][0][-1]["content"])
 
     def test_step_limit_does_not_execute_tool(self):
-        called = []
-        tool = Tool(self.tool.name, self.tool.description, self.tool.parameters, lambda args: called.append(args))
         model = SequenceModel([Completion({"content": None, "tool_calls": [tool_call()]}, "tool_calls")])
-        agent = Agent(model, [tool], max_steps=1)
-        with self.assertRaises(StepLimitExceeded):
+        agent = Agent(model, self.tools, max_steps=1)
+        with patch("pathlib.Path.read_text") as read, self.assertRaises(StepLimitExceeded):
             agent.run("test")
-        self.assertEqual(called, [])
+        read.assert_not_called()
         self.assertEqual(agent.history, [])
 
     def test_truncated_call_is_not_executed(self):
-        called = []
-        tool = Tool(self.tool.name, self.tool.description, self.tool.parameters, lambda args: called.append(args))
         model = SequenceModel([Completion({"content": None, "tool_calls": [tool_call()]}, "length")])
-        with self.assertRaises(AgentError):
-            Agent(model, [tool]).run("test")
-        self.assertEqual(called, [])
+        with patch("pathlib.Path.read_text") as read, self.assertRaises(AgentError):
+            Agent(model, self.tools).run("test")
+        read.assert_not_called()
+
+    def test_custom_tools_cannot_be_registered(self):
+        for name in ("bash", "write_file", "edit_file", "echo", "read_file"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                Agent(SequenceModel([]), [Tool(name, "unsafe", {}, lambda _args: None)])
+
+    def test_model_requested_write_tool_is_not_executed(self):
+        model = SequenceModel([
+            Completion({"content": None, "tool_calls": [tool_call('{"path":"created.txt"}', "write_file")]}, "tool_calls"),
+            Completion({"content": "done"}, "stop"),
+        ])
+        self.assertEqual(Agent(model, self.tools).run("write a file"), "done")
+        self.assertIn("unknown tool", model.requests[1][0][-1]["content"])
+        self.assertFalse((self.root / "created.txt").exists())
 
 
 class WorkspaceTests(unittest.TestCase):

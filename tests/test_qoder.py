@@ -3,13 +3,16 @@ import hashlib
 import importlib.util
 import io
 import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
-from glass_agent.core import Agent, Tool
+from glass_agent.core import Agent
 from glass_agent.provider import ModelError
 from glass_agent.qoder import ENCODING_ALPHABET, QoderModel, STANDARD_ALPHABET
+from glass_agent.tools import workspace_tools
 
 
 def qoder_event(body):
@@ -50,7 +53,7 @@ class FakeQoderOpener:
         if len(self.chat_bodies) == 1:
             chunk = {"choices": [{"delta": {"tool_calls": [{
                 "index": 0, "id": "call-1",
-                "function": {"name": "echo", "arguments": '{"text":"hello"}'},
+                "function": {"name": "read_file", "arguments": '{"path":"notes.txt"}'},
             }]}, "finish_reason": "tool_calls"}]}
         else:
             assert body["messages"][-2]["content"] == " "
@@ -83,10 +86,10 @@ class QoderTests(unittest.TestCase):
         transport = FakeQoderOpener()
         model = QoderModel("synthetic-pat", "Live Model")
         model._opener = transport
-        tool = Tool("echo", "Echo text", {"type": "object", "properties": {"text": {"type": "string"}},
-                                         "required": ["text"], "additionalProperties": False},
-                    lambda args: args["text"])
-        self.assertEqual(Agent(model, [tool]).run("call echo"), "done")
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+            self.assertEqual(Agent(model, workspace_tools(workspace)).run("read notes"), "done")
         self.assertEqual(len(transport.chat_bodies), 2)
         self.assertEqual(transport.chat_bodies[0]["model_config"]["key"], "live-key")
         self.assertEqual(transport.chat_bodies[0]["session_id"], transport.chat_bodies[1]["session_id"])

@@ -1,10 +1,18 @@
 """Small read-only workspace tool set."""
 
 import os
+import weakref
 from pathlib import Path
 from typing import List
 
 from .core import Tool
+
+
+_issued_tools = weakref.WeakValueDictionary()
+
+
+def is_workspace_read_tool(tool: Tool) -> bool:
+    return tool.name in ("list_files", "read_file") and _issued_tools.get(id(tool)) is tool
 
 
 def workspace_tools(workspace: Path) -> List[Tool]:
@@ -47,7 +55,7 @@ def workspace_tools(workspace: Path) -> List[Tool]:
         except UnicodeError:
             raise ValueError("file is not UTF-8 text") from None
 
-    return [
+    tools = [
         Tool(
             name="list_files",
             description="List up to 100 visible files in the workspace, excluding hidden and dependency directories.",
@@ -61,3 +69,6 @@ def workspace_tools(workspace: Path) -> List[Tool]:
             execute=read_file,
         ),
     ]
+    for tool in tools:
+        _issued_tools[id(tool)] = tool
+    return tools

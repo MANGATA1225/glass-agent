@@ -14,10 +14,10 @@ python3 -m glass_agent --workspace . "这个项目有哪些文件？"
 
 ## 会话和上下文
 
-每次启动默认创建新会话，在第一次成功回答后把完整对话保存在工作区的 `.glass-agent/sessions/<id>.json`（权限 `0600`，目录已加入 `.gitignore`）。启动时会在终端输出会话路径；下次用 `--continue` 恢复该工作区最近一次会话，或用 `--session 路径` 恢复指定会话。恢复时工作区、provider 和模型需与原会话一致。`--no-save` 只保存在内存中。会话包含原始提问、回答和工具结果，请妥善保管；API Key/PAT 不写入会话。Qoder 的会话标识会随会话一起恢复。
+默认仅在内存中保留对话，退出后不写入本地文件。显式传 `--save` 后，第一次成功回答会把完整对话保存在工作区的 `.glass-agent/sessions/<id>.json`（权限 `0600`，目录已加入 `.gitignore`）。启动时会在终端输出会话路径；下次用 `--continue` 恢复该工作区最近一次会话，或用 `--session 路径` 恢复指定会话，这两个选项也会继续保存对话。恢复时工作区、provider 和模型需与原会话一致。`--no-save` 可以显式指定仅在内存中保留。会话包含原始提问、回答和工具结果，请妥善保管；API Key/PAT 不写入会话。Qoder 的会话标识会随会话一起恢复。
 
 ```sh
-python3 -m glass_agent --provider qoder --model '模型 key' --workspace .
+python3 -m glass_agent --provider qoder --model '模型 key' --workspace . --save
 python3 -m glass_agent --provider qoder --model '模型 key' --workspace . --continue
 ```
 
@@ -59,29 +59,8 @@ python3 -m unittest discover -s tests -v
 
 每步由模型返回文字或工具调用。Agent 验证工具名和参数，执行工具，将结果按 `tool_call_id` 送回模型，直到收到最终文字或达到 `--max-steps`。一次请求成功后写入会话历史；压缩成功后也保存摘要。工具按顺序执行，不支持并行或流式输出。
 
-默认工具仅能列出和读取工作区内的可见文件，禁止隐藏文件、`.git`、越界路径及指向这些位置的符号链接。读取限 64 KiB，工具返回给模型的内容默认限 8000 字符。框架不是进程沙箱；新增可写工具前应自行加权限控制。
+运行时只允许内置的 `list_files` 和 `read_file`。写文件、修改代码和 Bash/命令执行工具均不能注册或调用；模型自行请求未知工具也不会得到执行。只读工具仅能列出和读取工作区内的可见文件，禁止隐藏文件、`.git`、越界路径及指向这些位置的符号链接。读取限 64 KiB，工具返回给模型的内容默认限 8000 字符。`--save`、`--session` 和 `--continue` 会由程序本身写入会话文件。这里限制的是 Agent 的工具权限，不是操作系统级进程沙箱。
 
-## 扩展工具
-
-```python
-from glass_agent import Agent, ChatCompletionsModel, Tool
-
-echo = Tool(
-    name="echo",
-    description="Return the given text",
-    parameters={
-        "type": "object",
-        "properties": {"text": {"type": "string"}},
-        "required": ["text"],
-        "additionalProperties": False,
-    },
-    execute=lambda args: args["text"],
-)
-
-agent = Agent(ChatCompletionsModel(api_key="..."), [echo])
-print(agent.run("Call echo with hello"))
-```
-
-内置参数检查支持顶层对象的 `required`、`additionalProperties: false` 和 `string`、`integer`、`number`、`boolean` 类型。更复杂的参数应在工具函数内部验证。
+内置参数检查支持顶层对象的 `required`、`additionalProperties: false` 和 `string`、`integer`、`number`、`boolean` 类型。
 
 设计取舍参考了当前工作区的 Pi、Kepler Agent 和 Claude Code 快照中的模型／工具循环；这里独立实现，没有复制它们的代码或引入它们的依赖。

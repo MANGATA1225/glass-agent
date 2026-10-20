@@ -25,10 +25,11 @@ def main() -> int:
     parser.add_argument("--context-budget", type=int, default=60000,
                         help="approximate input character budget; older turns are summarized near 75%%")
     sessions = parser.add_mutually_exclusive_group()
+    sessions.add_argument("--save", action="store_true", help="create a new persistent session")
     sessions.add_argument("--session", type=Path, help="resume this session file, or create it")
     sessions.add_argument("--continue", dest="continue_session", action="store_true",
                           help="resume the latest saved session in this workspace")
-    sessions.add_argument("--no-save", action="store_true", help="keep conversation only in memory")
+    sessions.add_argument("--no-save", action="store_true", help="keep conversation only in memory (default)")
     args = parser.parse_args()
     try:
         if args.provider == "qoder":
@@ -52,7 +53,7 @@ def main() -> int:
             )
         agent = Agent(model, workspace_tools(args.workspace), max_steps=args.max_steps,
                       context_budget=args.context_budget)
-        if not args.no_save:
+        if args.save or args.session or args.continue_session:
             path = (SessionStore.latest_path(args.workspace) if args.continue_session else
                     args.session if args.session else SessionStore.new_path(args.workspace))
             store = SessionStore(path, args.workspace, args.provider, model.model)
