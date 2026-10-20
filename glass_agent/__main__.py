@@ -7,21 +7,41 @@ from pathlib import Path
 
 from .core import Agent, AgentError
 from .provider import ChatCompletionsModel, ModelError
+from .qoder import OFFICIAL_ENDPOINTS, QoderModel
 from .tools import workspace_tools
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Minimal read-only workspace agent")
+    parser = argparse.ArgumentParser(prog="glass-agent", description="Minimal read-only workspace agent")
     parser.add_argument("prompt", nargs="*", help="Question; omit for interactive mode")
     parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--model", default=os.getenv("GLASS_MODEL", "gpt-4.1-mini"))
-    parser.add_argument("--base-url", default=os.getenv("GLASS_BASE_URL", "https://api.openai.com/v1"))
+    parser.add_argument("--provider", choices=("openai", "qoder"),
+                        default=os.getenv("GLASS_PROVIDER", "openai"))
+    parser.add_argument("--model", default=os.getenv("GLASS_MODEL"))
+    parser.add_argument("--base-url", help="OpenAI API root or official Qoder model endpoint")
+    parser.add_argument("--list-models", action="store_true", help="list enabled Qoder account models")
     parser.add_argument("--max-steps", type=int, default=8)
     args = parser.parse_args()
     try:
-        model = ChatCompletionsModel(
-            api_key=os.getenv("OPENAI_API_KEY", ""), model=args.model, base_url=args.base_url
-        )
+        if args.provider == "qoder":
+            model = QoderModel(
+                pat=os.getenv("QODER_PERSONAL_ACCESS_TOKEN", ""), model=args.model,
+                base_url=args.base_url or os.getenv("QODER_BASE_URL", OFFICIAL_ENDPOINTS[0]),
+            )
+            if args.list_models:
+                for item in model.list_models():
+                    print(item["key"] + "\t" + str(item.get("display_name") or ""))
+                return 0
+            if not args.model:
+                raise ValueError("Qoder requires --model; run --provider qoder --list-models")
+        else:
+            if args.list_models:
+                raise ValueError("--list-models is supported only for Qoder")
+            model = ChatCompletionsModel(
+                api_key=os.getenv("OPENAI_API_KEY", ""),
+                model=args.model or "gpt-4.1-mini",
+                base_url=args.base_url or os.getenv("GLASS_BASE_URL", "https://api.openai.com/v1"),
+            )
         agent = Agent(model, workspace_tools(args.workspace), max_steps=args.max_steps)
         if args.prompt:
             print(agent.run(" ".join(args.prompt)))
