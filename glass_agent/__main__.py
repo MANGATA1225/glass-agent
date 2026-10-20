@@ -8,6 +8,7 @@ from pathlib import Path
 from .core import Agent, AgentError
 from .provider import ChatCompletionsModel, ModelError
 from .qoder import OFFICIAL_ENDPOINTS, QoderModel
+from .session import SessionStore
 from .tools import workspace_tools
 
 
@@ -21,6 +22,13 @@ def main() -> int:
     parser.add_argument("--base-url", help="OpenAI API root or official Qoder model endpoint")
     parser.add_argument("--list-models", action="store_true", help="list enabled Qoder account models")
     parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--context-budget", type=int, default=60000,
+                        help="approximate input character budget; older turns are summarized near 75%%")
+    sessions = parser.add_mutually_exclusive_group()
+    sessions.add_argument("--session", type=Path, help="resume this session file, or create it")
+    sessions.add_argument("--continue", dest="continue_session", action="store_true",
+                          help="resume the latest saved session in this workspace")
+    sessions.add_argument("--no-save", action="store_true", help="keep conversation only in memory")
     args = parser.parse_args()
     try:
         if args.provider == "qoder":
@@ -42,7 +50,15 @@ def main() -> int:
                 model=args.model or "gpt-4.1-mini",
                 base_url=args.base_url or os.getenv("GLASS_BASE_URL", "https://api.openai.com/v1"),
             )
-        agent = Agent(model, workspace_tools(args.workspace), max_steps=args.max_steps)
+        agent = Agent(model, workspace_tools(args.workspace), max_steps=args.max_steps,
+                      context_budget=args.context_budget)
+        if not args.no_save:
+            path = (SessionStore.latest_path(args.workspace) if args.continue_session else
+                    args.session if args.session else SessionStore.new_path(args.workspace))
+            store = SessionStore(path, args.workspace, args.provider, model.model)
+            store.load(agent)
+            agent.on_change = store.save
+            print("session: " + str(store.path), file=sys.stderr)
         if args.prompt:
             print(agent.run(" ".join(args.prompt)))
             return 0
@@ -55,7 +71,10 @@ def main() -> int:
             if prompt.strip().lower() in ("exit", "quit"):
                 return 0
             if prompt.strip():
-                print(agent.run(prompt))
+                try:
+                    print(agent.run(prompt))
+                except (AgentError, ModelError, OSError, ValueError) as exc:
+                    print("error: " + str(exc), file=sys.stderr)
     except (AgentError, ModelError, OSError, ValueError) as exc:
         print("error: " + str(exc), file=sys.stderr)
         return 1
