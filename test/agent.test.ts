@@ -76,6 +76,143 @@ test('failed compaction does not discard history and oversized input is rejected
   await assert.rejects(empty.run('x'.repeat(1200)), /exceeds context budget/);
 });
 
+test('a second question can read source after a file listing without overflowing the active turn', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-context-'));
+  t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });
+  const source = 'export const architecture = ' + 'x'.repeat(1700);
+  await writeFile(path.join(root, 'agent.ts'), source);
+  class InspectModel implements Model {
+    model = 'fake';
+    requests: Array<{ messages: Message[]; tools: ToolDeclaration[] }> = [];
+    summaries = 0;
+    activeSummaries = 0;
+    async complete(messages: Message[], tools: ToolDeclaration[]): Promise<Completion> {
+      this.requests.push({ messages, tools });
+      if (!tools.length) {
+        this.summaries++;
+        if (messages[0]!.content!.includes('current user question')) {
+          this.activeSummaries++;
+          return response('Source defines the agent architecture.');
+        }
+        return response('The workspace contains agent.ts.');
+      }
+      const latestUserIndex = messages.findLastIndex(item => item.role === 'user');
+      const latestUser = messages[latestUserIndex]?.content;
+      const current = messages.slice(latestUserIndex + 1);
+      if (latestUser === 'Which files can you see?') {
+        return current.some(item => item.role === 'tool') ? response('I can see agent.ts.')
+          : response(null, [{ id: 'list', type: 'function', function: { name: 'list_files', arguments: '{}' } }]);
+      }
+      return current.some(item => item.role === 'tool') ||
+        messages.some(item => item.content?.includes('Source defines the agent architecture.'))
+        ? response('The agent uses a model and read-only tools.')
+        : response(null, [{ id: 'read', type: 'function', function: { name: 'read_file', arguments: '{"path":"agent.ts"}' } }]);
+    }
+  }
+  const model = new InspectModel();
+  const agent = new Agent(model, await workspaceTools(root), { contextBudget: 2300 });
+  assert.equal(await agent.run('Which files can you see?'), 'I can see agent.ts.');
+  assert.equal(await agent.run('What is the architecture?'), 'The agent uses a model and read-only tools.');
+  assert.ok(model.summaries >= 1);
+  assert.equal(model.activeSummaries, 1);
+  assert.equal(agent.history.filter(item => item.role === 'tool' && item.content === source).length, 1);
+});
+
+test('read_file supports offsets so omitted content remains accessible', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-pages-'));
+  t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });
+  const source = 'abcdef'.repeat(1800);
+  await writeFile(path.join(root, 'large.txt'), source);
+  const read = (await workspaceTools(root)).find(tool => tool.name === 'read_file')!;
+  const first = await read.execute({ path: 'large.txt' });
+  assert.match(first, /continue with offset 6000/);
+  const second = await read.execute({ path: 'large.txt', offset: 6000 });
+  assert.equal(first.slice(0, 6000) + second.slice(0, source.length - 6000), source);
+  await assert.rejects(Promise.resolve().then(() => read.execute({ path: 'large.txt', offset: -1 })), /offset/);
+});
+
+test('older tool results are pruned only in model context, while recent results and raw history remain', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-prune-'));
+  t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });
+  const source = 'x'.repeat(2200);
+  await writeFile(path.join(root, 'source.txt'), source);
+  class ReadModel implements Model {
+    model = 'fake';
+    calls = 0;
+    finalContext: Message[] = [];
+    async complete(messages: Message[], tools: ToolDeclaration[]): Promise<Completion> {
+      assert.ok(tools.length);
+      this.calls++;
+      if (this.calls <= 3) return response(null, [{ id: `c${this.calls}`, type: 'function',
+        function: { name: 'read_file', arguments: '{"path":"source.txt"}' } }]);
+      this.finalContext = messages;
+      return response('done');
+    }
+  }
+  const model = new ReadModel();
+  const agent = new Agent(model, await workspaceTools(root), { contextBudget: 8000 });
+  assert.equal(await agent.run('inspect'), 'done');
+  const projected = model.finalContext.filter(item => item.role === 'tool');
+  assert.equal(projected.length, 3);
+  assert.match(projected[0]!.content!, /removed from model context/);
+  assert.equal(projected[1]!.content, source);
+  assert.equal(projected[2]!.content, source);
+  assert.equal(agent.history.filter(item => item.role === 'tool' && item.content === source).length, 3);
+});
+
+test('a batch of file reads shares an output budget and exposes continuation offsets', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-batch-'));
+  t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });
+  await writeFile(path.join(root, 'large.txt'), 'x'.repeat(10000));
+  class BatchModel implements Model {
+    model = 'fake';
+    calls = 0;
+    results: Message[] = [];
+    async complete(messages: Message[], _tools: ToolDeclaration[]): Promise<Completion> {
+      if (this.calls++ === 0) return response(null, Array.from({ length: 6 }, (_, index) => ({
+        id: `c${index}`, type: 'function' as const,
+        function: { name: 'read_file', arguments: '{"path":"large.txt"}' },
+      })));
+      this.results = messages.filter(item => item.role === 'tool');
+      return response('done');
+    }
+  }
+  const model = new BatchModel();
+  assert.equal(await new Agent(model, await workspaceTools(root)).run('read files'), 'done');
+  assert.equal(model.results.length, 6);
+  for (const result of model.results) {
+    assert.ok(result.content!.length <= 4000);
+    assert.match(result.content!, /continue with offset/);
+  }
+});
+
+test('long history is summarized in bounded chunks while preserving recent turns', async () => {
+  class CompactModel implements Model {
+    model = 'fake';
+    summaries = 0;
+    finalMessages: Message[] = [];
+    async complete(messages: Message[], _tools: ToolDeclaration[]): Promise<Completion> {
+      if (messages[0]?.content?.startsWith('Summarize this prior conversation')) {
+        this.summaries++;
+        return response(`checkpoint ${this.summaries}`);
+      }
+      this.finalMessages = messages;
+      return response('done');
+    }
+  }
+  const model = new CompactModel();
+  const agent = new Agent(model, [], { contextBudget: 2000 });
+  agent.history = Array.from({ length: 10 }, (_, index): Message[] => [
+    { role: 'user', content: `question ${index}` },
+    { role: 'assistant', content: `answer ${index}: ${'x'.repeat(550)}` },
+  ]).flat();
+  assert.equal(await agent.run('new question'), 'done');
+  assert.ok(model.summaries > 1);
+  assert.match(agent.summary, /checkpoint/);
+  assert.ok(model.finalMessages.some(item => item.content?.includes('question 9')));
+  assert.equal(agent.history.length, 22);
+});
+
 test('sessions are explicit, private, resumable, and compatible with previous JSON shape', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'glass-session-'));
   t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });

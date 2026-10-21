@@ -1,15 +1,41 @@
-import { ModelError } from './types.ts';
+import { ModelError, RetryableModelError } from './types.ts';
 import type { Completion, Message, Model, ToolDeclaration } from './types.ts';
 
 export type Fetcher = typeof fetch;
 
+function retryAfterMs(headers: Headers): number | undefined {
+  const milliseconds = headers.get('retry-after-ms');
+  if (milliseconds !== null) {
+    const value = Number(milliseconds);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  const header = headers.get('retry-after');
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  const value = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(header) - Date.now();
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+export function transientNetworkError(error: unknown): boolean {
+  return error instanceof TypeError || error instanceof Error && error.name === 'TimeoutError';
+}
+
 export async function request(fetcher: Fetcher, url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   try {
     const response = await fetcher(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) throw new ModelError(`model endpoint returned HTTP ${response.status}`);
+    if (!response.ok) {
+      const message = `model endpoint returned HTTP ${response.status}`;
+      const override = response.headers.get('x-should-retry');
+      if (override === 'true' || override !== 'false' &&
+          ([408, 409, 429].includes(response.status) || response.status >= 500)) {
+        throw new RetryableModelError(message, retryAfterMs(response.headers));
+      }
+      throw new ModelError(message);
+    }
     return response;
   } catch (error) {
     if (error instanceof ModelError) throw error;
+    if (transientNetworkError(error)) throw new RetryableModelError(`model request failed: ${(error as Error).name}`);
     throw new ModelError(`model request failed: ${error instanceof Error ? error.name : 'unknown error'}`);
   }
 }
@@ -27,6 +53,9 @@ export async function limitedText(response: Response, limit = 8 * 1024 * 1024): 
       if (total > limit) throw new ModelError('model response is too large');
       chunks.push(value);
     }
+  } catch (error) {
+    if (transientNetworkError(error)) throw new RetryableModelError(`model response stream failed: ${(error as Error).name}`);
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -63,8 +92,9 @@ export class ChatCompletionsModel implements Model {
     const response = await request(this.fetcher, this.url, { method: 'POST', headers: {
       Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json',
     }, body: JSON.stringify(body) }, this.timeoutMs);
+    const text = await limitedText(response);
     let data: unknown;
-    try { data = JSON.parse(await limitedText(response)); }
+    try { data = JSON.parse(text); }
     catch { throw new ModelError('model API returned invalid JSON'); }
     const choice = (data as { choices?: Array<{ message?: Message; finish_reason?: string }> }).choices?.[0];
     if (!choice?.message || typeof choice.message !== 'object') throw new ModelError('model API returned an invalid response');

@@ -42,5 +42,12 @@ export function declaration(tool: Tool): ToolDeclaration {
 
 export class AgentError extends Error {}
 export class ModelError extends Error {}
+export class RetryableModelError extends ModelError {
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
+    super(message);
+    this.retryAfterMs = retryAfterMs;
+  }
+}
 export class ContextLimitExceeded extends AgentError {}
 export class StepLimitExceeded extends AgentError {}

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { Agent } from './agent.ts';
 import { ChatCompletionsModel } from './models.ts';
 import { OFFICIAL_ENDPOINTS, QoderModel } from './qoder.ts';
+import { withRetry } from './retry.ts';
 import { SessionStore } from './session.ts';
 import { workspaceTools } from './tools.ts';
 
@@ -19,7 +20,8 @@ Options:
   --base-url URL         OpenAI API root or official Qoder endpoint
   --list-models          List enabled Qoder models
   --max-steps N          Maximum model calls per question (default: 8)
-  --context-budget N     Approximate character budget (default: 60000)
+  --max-retries N        Retries for transient model failures (default: 2; 0 disables)
+  --context-budget N     Approximate character budget (default: 120000)
   --save                 Create a persistent session
   --session PATH         Resume or create this session file
   --continue             Resume latest workspace session
@@ -36,11 +38,18 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
   return number;
 }
 
+function nonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined) return fallback;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error(`${name} must be a non-negative integer`);
+  return number;
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     workspace: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
     'base-url': { type: 'string' }, 'list-models': { type: 'boolean' },
-    'max-steps': { type: 'string' }, 'context-budget': { type: 'string' },
+    'max-steps': { type: 'string' }, 'max-retries': { type: 'string' }, 'context-budget': { type: 'string' },
     save: { type: 'boolean' }, session: { type: 'string' }, continue: { type: 'boolean' },
     'no-save': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
@@ -53,7 +62,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const workspace = path.resolve(values.workspace ?? process.cwd());
   const modelName = values.model ?? process.env.GLASS_MODEL;
   const maxSteps = positiveInteger(values['max-steps'], 8, '--max-steps');
-  const contextBudget = positiveInteger(values['context-budget'], 60000, '--context-budget');
+  const maxRetries = nonNegativeInteger(values['max-retries'], 2, '--max-retries');
+  const onRetry = (attempt: number, delayMs: number, error: Error): void => {
+    process.stderr.write(`retry ${attempt}/${maxRetries} in ${Math.ceil(delayMs)} ms: ${error.message}\n`);
+  };
+  const contextBudget = positiveInteger(values['context-budget'], 120000, '--context-budget');
   const model = provider === 'qoder'
     ? new QoderModel(process.env.QODER_PERSONAL_ACCESS_TOKEN ?? '', modelName,
       values['base-url'] ?? process.env.QODER_BASE_URL ?? OFFICIAL_ENDPOINTS[0])
@@ -61,11 +74,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       values['base-url'] ?? process.env.GLASS_BASE_URL ?? 'https://api.openai.com/v1');
   if (values['list-models']) {
     if (!(model instanceof QoderModel)) throw new Error('--list-models is supported only for Qoder');
-    for (const item of await model.listModels()) process.stdout.write(`${item.key}\t${item.display_name ?? ''}\n`);
+    for (const item of await withRetry(() => model.listModels(), { maxRetries, onRetry })) {
+      process.stdout.write(`${item.key}\t${item.display_name ?? ''}\n`);
+    }
     return 0;
   }
   if (provider === 'qoder' && !modelName) throw new Error('Qoder requires --model; run --provider qoder --list-models');
-  const agent = new Agent(model, await workspaceTools(workspace), { maxSteps, contextBudget });
+  const agent = new Agent(model, await workspaceTools(workspace), { maxSteps, maxRetries, onRetry, contextBudget });
   if (values.save || values.session || values.continue) {
     const file = values.continue ? await SessionStore.latestPath(workspace)
       : values.session ?? await SessionStore.newPath(workspace);

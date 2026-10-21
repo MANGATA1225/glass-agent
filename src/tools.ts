@@ -50,6 +50,14 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
 
   async function readFile(arguments_: Record<string, unknown>): Promise<string> {
     if (typeof arguments_.path !== 'string') throw new Error('path must be a string');
+    const offset = arguments_.offset ?? 0;
+    const limit = arguments_.limit ?? 6000;
+    if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error('offset must be a non-negative character position');
+    }
+    if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 1 || limit > 6000) {
+      throw new Error('limit must be between 1 and 6000 characters');
+    }
     const candidate = visibleRelative(root, arguments_.path);
     const resolved = await realpath(candidate);
     const relative = path.relative(root, resolved);
@@ -61,9 +69,14 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) throw new Error('file not found');
-      if (stat.size > 65536) throw new Error('file is larger than 64 KiB');
+      if (stat.size > 1024 * 1024) throw new Error('file is larger than 1 MiB');
       const bytes = await handle.readFile();
-      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      if (offset >= content.length) return `(no content at offset ${offset}; file has ${content.length} characters)`;
+      const end = Math.min(content.length, offset + limit);
+      const excerpt = content.slice(offset, end);
+      return offset === 0 && end === content.length ? excerpt
+        : `${excerpt}\n[Showing characters ${offset}-${end} of ${content.length}; ${end < content.length ? `continue with offset ${end}` : 'end of file'}]`;
     } finally {
       await handle.close();
     }
@@ -72,8 +85,8 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
   const tools: Tool[] = [
     { name: 'list_files', description: 'List up to 100 visible workspace files.',
       parameters: { type: 'object', properties: {}, additionalProperties: false }, execute: listFiles },
-    { name: 'read_file', description: 'Read one visible UTF-8 workspace file, up to 64 KiB.',
-      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+    { name: 'read_file', description: 'Read up to 6000 characters from one visible UTF-8 file (max 1 MiB). Use offset to continue from the displayed character position.',
+      parameters: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['path'], additionalProperties: false },
       execute: readFile },
   ];
   for (const tool of tools) {

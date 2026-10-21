@@ -1,7 +1,7 @@
 import { constants, createCipheriv, createHash, publicEncrypt, randomUUID } from 'node:crypto';
-import { limitedText, request } from './models.ts';
+import { limitedText, request, transientNetworkError } from './models.ts';
 import type { Fetcher } from './models.ts';
-import { ModelError } from './types.ts';
+import { ModelError, RetryableModelError } from './types.ts';
 import type { Completion, Message, Model, ToolCall, ToolDeclaration } from './types.ts';
 
 const OPENAPI = 'https://openapi.qoder.sh';
@@ -61,8 +61,9 @@ export class QoderModel implements Model {
   private async jsonRequest(method: string, url: string, body?: Buffer, headers: Record<string, string> = {}): Promise<Record<string, unknown>> {
     const response = await request(this.fetcher, url, { method, headers: { 'Content-Type': 'application/json', ...headers },
       body: body ? new Uint8Array(body) : undefined }, this.timeoutMs);
+    const text = await limitedText(response);
     let result: unknown;
-    try { result = JSON.parse(await limitedText(response)); }
+    try { result = JSON.parse(text); }
     catch { throw new ModelError('Qoder returned invalid JSON'); }
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new ModelError('Qoder returned an invalid object');
     return result as Record<string, unknown>;
@@ -153,7 +154,7 @@ export class QoderModel implements Model {
 }
 
 export async function readQoderStream(response: Response): Promise<Completion> {
-  if (!response.body) throw new ModelError('Qoder returned an empty stream');
+  if (!response.body) throw new RetryableModelError('Qoder returned an empty stream');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let pending = '', content = '', finishReason: string | null = null, done = false, total = 0;
@@ -168,6 +169,10 @@ export async function readQoderStream(response: Response): Promise<Completion> {
     try { envelope = JSON.parse(data) as Record<string, unknown>; }
     catch { throw new ModelError('Qoder returned an invalid stream event'); }
     if (envelope.statusCodeValue !== undefined && envelope.statusCodeValue !== 0 && envelope.statusCodeValue !== 200) {
+      const status = Number(envelope.statusCodeValue);
+      if ([408, 409, 429].includes(status) || status >= 500 && status <= 599) {
+        throw new RetryableModelError(`Qoder stream returned gateway HTTP ${status}`);
+      }
       throw new ModelError('Qoder stream returned a gateway error');
     }
     let body = envelope.body;
@@ -214,8 +219,11 @@ export async function readQoderStream(response: Response): Promise<Completion> {
         if (done) break;
       }
     }
+  } catch (error) {
+    if (transientNetworkError(error)) throw new RetryableModelError(`Qoder stream failed: ${(error as Error).name}`);
+    throw error;
   } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-  if (!done || !finishReason) throw new ModelError('Qoder stream ended before inference completed');
+  if (!done || !finishReason) throw new RetryableModelError('Qoder stream ended before inference completed');
   const ordered = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => {
     let args: unknown;
     try { args = JSON.parse(call.function.arguments); }
@@ -226,7 +234,7 @@ export async function readQoderStream(response: Response): Promise<Completion> {
     return call;
   });
   if (finishReason === 'tool_calls' && !ordered.length) throw new ModelError('Qoder indicated tool calls but returned none');
-  if (!content.trim() && !ordered.length) throw new ModelError('Qoder returned an empty response');
+  if (!content.trim() && !ordered.length) throw new RetryableModelError('Qoder returned an empty response');
   return { message: { role: 'assistant', content: content || null,
     ...(ordered.length ? { tool_calls: ordered } : {}) }, finishReason };
 }
