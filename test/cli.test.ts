@@ -24,3 +24,30 @@ test('CLI defaults to memory-only and saves only when requested', async t => {
     else process.env.OPENAI_API_KEY = previousKey;
   }
 });
+
+test('one-shot --stream prints deltas once and ends with a newline', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-stream-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousKey = process.env.OPENAI_API_KEY;
+  const previousFetch = globalThis.fetch;
+  const previousWrite = process.stdout.write;
+  const output: string[] = [];
+  process.env.OPENAI_API_KEY = 'synthetic-key';
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { stream?: boolean };
+    assert.equal(body.stream, true);
+    return new Response('data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+      + 'data: {"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n'
+      + 'data: [DONE]\n\n');
+  };
+  process.stdout.write = ((chunk: string | Uint8Array) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  try {
+    assert.equal(await main(['--workspace', root, '--stream', 'hello']), 0);
+    assert.equal(output.join(''), 'hello\n');
+  } finally {
+    process.stdout.write = previousWrite;
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});

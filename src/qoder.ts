@@ -124,7 +124,7 @@ export class QoderModel implements Model {
       'Cosy-Business-Type': 'agent', ...(auth.organization ? { 'Cosy-Organization-Id': auth.organization } : {}) };
   }
 
-  async complete(messages: Message[], tools: ToolDeclaration[]): Promise<Completion> {
+  async complete(messages: Message[], tools: ToolDeclaration[], onText?: (delta: string) => void): Promise<Completion> {
     if (!this.model) throw new Error('Qoder model is required; list models first');
     const catalog = await this.listModels();
     const selected = catalog.find(item => this.model === item.key || this.model === item.display_name);
@@ -149,11 +149,11 @@ export class QoderModel implements Model {
       ...this.sign(url, encoded, auth), Accept: 'text/event-stream', 'Content-Type': 'application/json',
       'X-Model-Key': selected.key, 'X-Model-Source': selected.source ?? '',
     }, body: new Uint8Array(encoded) }, this.timeoutMs);
-    return readQoderStream(response);
+    return readQoderStream(response, onText);
   }
 }
 
-export async function readQoderStream(response: Response): Promise<Completion> {
+export async function readQoderStream(response: Response, onText?: (delta: string) => void): Promise<Completion> {
   if (!response.body) throw new RetryableModelError('Qoder returned an empty stream');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -187,7 +187,10 @@ export async function readQoderStream(response: Response): Promise<Completion> {
     const choice = (event.choices as Array<Record<string, unknown>> | undefined)?.[0];
     if (!choice) return;
     const delta = (choice.delta ?? {}) as Record<string, unknown>;
-    if (typeof delta.content === 'string') content += delta.content;
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      onText?.(delta.content);
+    }
     for (const part of (delta.tool_calls ?? []) as Array<Record<string, unknown>>) {
       const index = part.index;
       if (!Number.isInteger(index) || typeof index !== 'number' || index < 0 || index > 1023) {

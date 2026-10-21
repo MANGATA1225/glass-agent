@@ -13,6 +13,8 @@ npm start -- --workspace . '这个项目有哪些文件？'
 
 默认使用 `gpt-4.1-mini` 和 OpenAI Chat Completions。可通过 `--model`、`--base-url` 或 `GLASS_MODEL`、`GLASS_BASE_URL` 调整；远程地址必须为 HTTPS，本机地址可用 HTTP。不传问题时进入交互模式，输入 `exit` 退出。
 
+交互模式默认逐段显示模型文本；一次性命令默认等完整回答返回。用 `--stream` 可为一次性命令开启流式输出，`--no-stream` 可关闭交互模式流式输出。Qoder 原生 SSE 与 OpenAI 兼容接口均支持；工具参数会等到流完整结束并校验后再执行。若已经显示部分文本后连接中断，会显示错误，不自动重试这段可见输出。
+
 ## Qoder
 
 Qoder Personal Access Token（PAT）不是 OpenAI API Key。先用 PAT 换取短期 job token，读取账号启用的模型列表，再按 Qoder 原生 COSY 协议调用模型。工具调用和会话历史仍由 glass-agent 控制。

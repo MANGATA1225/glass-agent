@@ -22,6 +22,8 @@ Options:
   --max-steps N          Maximum model calls per question (default: 8)
   --max-retries N        Retries for transient model failures (default: 2; 0 disables)
   --context-budget N     Approximate character budget (default: 120000)
+  --stream               Print answer text as it arrives
+  --no-stream            Wait for the complete answer (default for one-shot mode)
   --save                 Create a persistent session
   --session PATH         Resume or create this session file
   --continue             Resume latest workspace session
@@ -51,9 +53,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     'base-url': { type: 'string' }, 'list-models': { type: 'boolean' },
     'max-steps': { type: 'string' }, 'max-retries': { type: 'string' }, 'context-budget': { type: 'string' },
     save: { type: 'boolean' }, session: { type: 'string' }, continue: { type: 'boolean' },
-    'no-save': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+    'no-save': { type: 'boolean' }, stream: { type: 'boolean' },
+    'no-stream': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
   } });
   if (values.help) { process.stdout.write(HELP); return 0; }
+  if (values.stream && values['no-stream']) throw new Error('choose only one streaming option');
   const sessionOptions = [values.save, values.session !== undefined, values.continue, values['no-save']]
     .filter(Boolean).length;
   if (sessionOptions > 1) throw new Error('choose only one session option');
@@ -67,6 +71,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`retry ${attempt}/${maxRetries} in ${Math.ceil(delayMs)} ms: ${error.message}\n`);
   };
   const contextBudget = positiveInteger(values['context-budget'], 120000, '--context-budget');
+  const streaming = values.stream || !values['no-stream'] && positionals.length === 0;
+  let printed = false;
+  const onText = streaming ? (delta: string): void => {
+    printed = true;
+    process.stdout.write(delta);
+  } : undefined;
   const model = provider === 'qoder'
     ? new QoderModel(process.env.QODER_PERSONAL_ACCESS_TOKEN ?? '', modelName,
       values['base-url'] ?? process.env.QODER_BASE_URL ?? OFFICIAL_ENDPOINTS[0])
@@ -80,7 +90,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (provider === 'qoder' && !modelName) throw new Error('Qoder requires --model; run --provider qoder --list-models');
-  const agent = new Agent(model, await workspaceTools(workspace), { maxSteps, maxRetries, onRetry, contextBudget });
+  const agent = new Agent(model, await workspaceTools(workspace), { maxSteps, maxRetries, onRetry, onText, contextBudget });
   if (values.save || values.session || values.continue) {
     const file = values.continue ? await SessionStore.latestPath(workspace)
       : values.session ?? await SessionStore.newPath(workspace);
@@ -90,7 +100,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`session: ${store.file}\n`);
   }
   if (positionals.length) {
-    process.stdout.write(`${await agent.run(positionals.join(' '))}\n`);
+    printed = false;
+    try {
+      const answer = await agent.run(positionals.join(' '));
+      process.stdout.write(streaming ? '\n' : `${answer}\n`);
+    } catch (error) {
+      if (printed) process.stdout.write('\n');
+      throw error;
+    }
     return 0;
   }
   const readline = createInterface({ input: process.stdin, output: process.stdout });
@@ -101,8 +118,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       catch { return 0; }
       if (['exit', 'quit'].includes(prompt.trim().toLowerCase())) return 0;
       if (!prompt.trim()) continue;
-      try { process.stdout.write(`${await agent.run(prompt)}\n`); }
-      catch (error) { process.stderr.write(`error: ${error instanceof Error ? error.message : 'unknown error'}\n`); }
+      printed = false;
+      try {
+        const answer = await agent.run(prompt);
+        process.stdout.write(streaming ? '\n' : `${answer}\n`);
+      } catch (error) {
+        if (printed) process.stdout.write('\n');
+        process.stderr.write(`error: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+      }
     }
   } finally { readline.close(); }
 }

@@ -24,7 +24,7 @@ export interface Completion {
 export interface Model {
   model: string;
   sessionId?: string;
-  complete(messages: Message[], tools: ToolDeclaration[]): Promise<Completion>;
+  complete(messages: Message[], tools: ToolDeclaration[], onText?: (delta: string) => void): Promise<Completion>;
 }
 
 export interface Tool {

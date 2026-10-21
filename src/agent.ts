@@ -1,6 +1,6 @@
 import { isWorkspaceReadTool } from './tools.ts';
 import { withRetry } from './retry.ts';
-import { AgentError, ContextLimitExceeded, RetryableModelError, StepLimitExceeded, declaration } from './types.ts';
+import { AgentError, ContextLimitExceeded, ModelError, RetryableModelError, StepLimitExceeded, declaration } from './types.ts';
 import type { Completion, Message, Model, Tool, ToolCall, ToolDeclaration } from './types.ts';
 
 function size(value: unknown): number { return JSON.stringify(value).length; }
@@ -55,6 +55,7 @@ export interface AgentOptions {
   contextBudget?: number;
   maxRetries?: number;
   onRetry?: (attempt: number, delayMs: number, error: RetryableModelError) => void;
+  onText?: (delta: string) => void;
   onChange?: (agent: Agent) => Promise<void> | void;
 }
 
@@ -70,6 +71,7 @@ export class Agent {
   readonly contextBudget: number;
   readonly maxRetries: number;
   readonly onRetry?: (attempt: number, delayMs: number, error: RetryableModelError) => void;
+  readonly onText?: (delta: string) => void;
   onChange?: (agent: Agent) => Promise<void> | void;
 
   constructor(model: Model, tools: Tool[], options: AgentOptions = {}) {
@@ -79,6 +81,7 @@ export class Agent {
     this.contextBudget = options.contextBudget ?? 120000;
     this.maxRetries = options.maxRetries ?? 2;
     this.onRetry = options.onRetry;
+    this.onText = options.onText;
     if (this.maxSteps < 1 || this.maxToolOutput < 1 || this.contextBudget < 1000) {
       throw new Error('maxSteps and maxToolOutput must be positive; contextBudget must be at least 1000');
     }
@@ -211,12 +214,24 @@ export class Agent {
     const declarations = [...this.tools.values()].map(declaration);
     for (let step = 0; step < this.maxSteps; step++) {
       const context = await this.context(working, declarations, active);
+      let emitted = false;
       const response: Completion = await withRetry(async () => {
-        const result = await this.model.complete(context, declarations);
-        if (!result.message?.content?.trim() && !result.message?.tool_calls?.length && result.finishReason !== 'length') {
-          throw new RetryableModelError('model returned neither text nor tool calls');
+        try {
+          const result = await this.model.complete(context, declarations, this.onText ? delta => {
+            if (!delta) return;
+            emitted = true;
+            this.onText!(delta);
+          } : undefined);
+          if (!result.message?.content?.trim() && !result.message?.tool_calls?.length && result.finishReason !== 'length') {
+            throw new RetryableModelError('model returned neither text nor tool calls');
+          }
+          return result;
+        } catch (error) {
+          if (emitted && error instanceof RetryableModelError) {
+            throw new ModelError(`stream failed after partial output: ${error.message}`);
+          }
+          throw error;
         }
-        return result;
       }, this);
       const message = response.message;
       if (!message || typeof message !== 'object') throw new AgentError('model response has no message');
@@ -227,6 +242,7 @@ export class Agent {
       if (response.finishReason === 'length') throw new AgentError('model response was truncated');
       if (calls.length) {
         if (step === this.maxSteps - 1) throw new StepLimitExceeded('maximum model steps reached before tool results could be read');
+        if (emitted) this.onText?.('\n');
         const normalized: ToolCall[] = calls.map(call => {
           if (typeof call?.id !== 'string' || typeof call.function?.name !== 'string'
               || typeof call.function.arguments !== 'string') throw new AgentError('model returned an invalid tool call');
@@ -247,6 +263,7 @@ export class Agent {
       working.push({ role: 'assistant', content: message.content });
       this.history = working;
       await this.onChange?.(this);
+      if (!emitted) this.onText?.(message.content);
       return message.content;
     }
     throw new StepLimitExceeded('maximum model steps reached');
