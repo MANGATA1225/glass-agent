@@ -1,19 +1,40 @@
 # glass-agent
 
-使用 TypeScript 和 Node.js 24+ 实现的轻量只读 Agent。模型循环、上下文压缩、会话恢复、工作区文件工具和 Qoder 适配均在 `src/` 中；运行时只使用 Node 内置 API，TypeScript 仅用于类型检查。
+使用 TypeScript 和 Node.js 24+ 实现的轻量只读 Agent。模型循环、上下文压缩、会话恢复、工作区文件工具和 ChatGPT、Qoder 适配均在 `src/` 中。运行时使用 `jose` 校验 ChatGPT 的 OIDC ID token；TypeScript 仅用于类型检查。
 
 ## 安装与运行
 
 ```sh
 cd /Users/zhuanz/glass-agent
 npm ci
-export OPENAI_API_KEY='你的模型 API Key'
-npm start -- --workspace . '这个项目有哪些文件？'
+npm start -- --provider chatgpt --login
+npm start -- --provider chatgpt --list-models
+npm start -- --provider chatgpt --model '上一步返回的模型 slug' --workspace .
 ```
 
-默认使用 `gpt-4.1-mini` 和 OpenAI Chat Completions。可通过 `--model`、`--base-url` 或 `GLASS_MODEL`、`GLASS_BASE_URL` 调整；远程地址必须为 HTTPS，本机地址可用 HTTP。不传问题时进入交互模式，输入 `exit` 退出。
+默认 provider 是 `chatgpt`，需要先登录，再选择账号模型目录返回的 slug。一次性提问可在末尾加问题。不传问题时进入交互模式，输入 `exit` 退出。
+`--workspace` 指定 Agent 能查看的目录；省略时使用启动命令所在目录。程序会把该目录的实际绝对路径告诉模型；模型需要调用 `list_files` 和 `read_file` 才能查看文件名和代码内容。
 
-交互模式默认逐段显示模型文本；一次性命令默认等完整回答返回。用 `--stream` 可为一次性命令开启流式输出，`--no-stream` 可关闭交互模式流式输出。Qoder 原生 SSE 与 OpenAI 兼容接口均支持；工具参数会等到流完整结束并校验后再执行。若已经显示部分文本后连接中断，会显示错误，不自动重试这段可见输出。
+## ChatGPT 套餐授权
+
+`--login` 会在运行 glass-agent 的电脑上监听 `127.0.0.1:1455/auth/callback`（端口占用时使用其他本地端口），输出官方授权链接，并等待五分钟。浏览器和程序在同一台电脑时可自动收到回调。若浏览器在另一台电脑，在该浏览器完成授权后，把地址栏中的**完整回调 URL 粘贴到运行 glass-agent 的终端**；输入不会回显。浏览器显示无法连接本地回调地址时，仍可复制地址栏 URL。一次登录尝试的回调只能使用一次；过期后重新执行 `--login`。不要把回调 URL 发到聊天、工单或日志中。
+
+首次授权用 `dynamic_agent_client` 注册，后续使用回调返回的正式 client ID。程序校验 state、PKCE、ID token 签名与 nonce、账号身份及授权 scope 后才保存凭据。Host ID 和凭据默认位于 `~/.config/glass-agent/chatgpt/`，目录权限 `0700`、文件权限 `0600`，不在工作区会话中。续期使用单份本地凭据和跨进程锁，替换 refresh token 后原子写入。ChatGPT 凭据只发送到官方认证端点及 `https://api.openai.com/v1/models`、`/responses`；`--base-url` 对此 provider 禁用。套餐资格、模型和额度由 OpenAI 账号实际授权决定。
+
+可参考 OpenAI 官方文档：[登录授权](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[模型与推理](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)、[当前限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)。
+
+## API Key provider
+
+原有 OpenAI Chat Completions API Key 模式仍可单独使用：
+
+```sh
+export OPENAI_API_KEY='你的模型 API Key'
+npm start -- --provider openai --model gpt-4.1-mini --workspace .
+```
+
+此模式可通过 `--base-url` 或 `GLASS_BASE_URL` 调整接口地址；远程地址必须为 HTTPS，本机地址可用 HTTP。ChatGPT 套餐模式不会自动切换到 API Key 计费。
+
+交互模式默认逐段显示模型文本；一次性命令默认等完整回答返回。用 `--stream` 可为一次性命令开启流式输出，`--no-stream` 可关闭交互模式流式输出。ChatGPT 套餐模式始终向服务端请求流式 Responses；解析器会收集流中的文本和已完成的输出项，收到 `response.completed` 后才采纳回答和执行工具。若已经显示部分文本后连接中断，会显示错误，不自动重试这段可见输出。
 
 ## Qoder
 
@@ -40,7 +61,7 @@ npm start -- --provider qoder --model '模型 key' --workspace . --continue
 
 ## 失败重试
 
-模型请求遇到网络超时、连接错误、HTTP 408/409/429/5xx、Qoder 流意外中断或空回答时，默认最多额外重试 2 次。优先遵循服务端 `Retry-After-Ms` 或 `Retry-After`，否则以约 0.5 秒、1 秒的指数退避等待并加入少量随机抖动；服务端要求等待超过 60 秒时会直接报错。终端会显示重试次数、等待时间和错误原因。可用 `--max-retries 0` 关闭，或用其他非负整数调整次数。401/403、无效模型或协议数据等明确错误会立即返回。回答和摘要都适用此策略；工具仅在模型请求成功后执行。
+模型请求遇到网络超时、连接错误、HTTP 408/409/429/5xx、Qoder 或 ChatGPT 流意外中断、空回答时，默认最多额外重试 2 次。优先遵循服务端 `Retry-After-Ms` 或 `Retry-After`，否则以约 0.5 秒、1 秒的指数退避等待并加入少量随机抖动；服务端要求等待超过 60 秒时会直接报错。终端会显示重试次数、等待时间和错误原因。可用 `--max-retries 0` 关闭，或用其他非负整数调整次数。401/403、无效模型或协议数据等明确错误会立即返回。回答和摘要都适用此策略；工具仅在模型请求成功后执行。
 
 ## 只读权限
 
@@ -59,8 +80,10 @@ npm test
 | `src/retry.ts` | 有界重试与退避策略 |
 | `src/tools.ts` | 工作区只读文件工具 |
 | `src/models.ts` | Chat Completions 适配器 |
+| `src/chatgpt-auth.ts` | ChatGPT OAuth、OIDC 校验、私有凭据和自动续期 |
+| `src/chatgpt-model.ts` | ChatGPT 模型目录与 Responses 流、工具调用适配 |
 | `src/qoder.ts` | Qoder PAT 交换、模型发现、COSY 签名与流解析 |
 | `src/session.ts` | 原子写入、恢复会话 |
 | `src/cli.ts` | 命令行入口 |
 
-测试使用模拟模型和模拟 Qoder 响应，不使用真实 PAT。
+测试使用模拟模型、ChatGPT 授权与响应、Qoder 响应，不使用真实凭据。

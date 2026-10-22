@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
@@ -12,5 +14,8 @@
   "devDependencies": {
     "@types/node": "24.10.0",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
   }
 }
