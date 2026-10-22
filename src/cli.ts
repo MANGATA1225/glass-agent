@@ -7,6 +7,7 @@ import { Agent } from './agent.ts';
 import { ChatGPTCredentials } from './chatgpt-auth.ts';
 import { ChatGPTModel } from './chatgpt-model.ts';
 import { ChatCompletionsModel } from './models.ts';
+import { safeOutput, SafeOutputStream } from './output.ts';
 import { OFFICIAL_ENDPOINTS, QoderModel } from './qoder.ts';
 import { withRetry } from './retry.ts';
 import { SessionStore } from './session.ts';
@@ -83,7 +84,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         !path.isAbsolute(relative) && relative.split(path.sep).every(part => !part.startsWith('.'))) {
       throw new Error('Slack config must be outside the agent-readable workspace');
     }
-    process.stdout.write(`Slack config template created: ${await initSlackConfig(slackConfigFile)}\n`);
+    process.stdout.write(`Slack config template created: ${safeOutput(await initSlackConfig(slackConfigFile), workspace)}\n`);
     return 0;
   }
   if (values.slack && (provider !== 'chatgpt' || values.login || values['list-models'] || positionals.length ||
@@ -114,15 +115,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const modelName = values.model ?? process.env.GLASS_MODEL;
   const maxSteps = positiveInteger(values['max-steps'], 8, '--max-steps');
   const maxRetries = nonNegativeInteger(values['max-retries'], 2, '--max-retries');
+  let displayWorkspace = workspace;
   const onRetry = (attempt: number, delayMs: number, error: Error): void => {
-    process.stderr.write(`retry ${attempt}/${maxRetries} in ${Math.ceil(delayMs)} ms: ${error.message}\n`);
+    process.stderr.write(`retry ${attempt}/${maxRetries} in ${Math.ceil(delayMs)} ms: ${safeOutput(error.message, displayWorkspace, [workspace])}\n`);
   };
   const contextBudget = positiveInteger(values['context-budget'], 120000, '--context-budget');
   const streaming = values.stream || !values['no-stream'] && positionals.length === 0;
   let printed = false;
+  let outputStream: SafeOutputStream | undefined;
   const onText = streaming ? (delta: string): void => {
     printed = true;
-    process.stdout.write(delta);
+    outputStream?.write(delta);
   } : undefined;
   const model = provider === 'chatgpt'
     ? new ChatGPTModel(new ChatGPTCredentials(), modelName ?? (values['list-models'] ? '__catalog__' : ''))
@@ -145,9 +148,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
   if (provider === 'qoder' && !modelName) throw new Error('Qoder requires --model; run --provider qoder --list-models');
   const workspaceRoot = await realpath(workspace);
-  const systemPrompt = `You are a helpful read-only workspace assistant. The current workspace root is ${JSON.stringify(workspaceRoot)}. `
+  displayWorkspace = workspaceRoot;
+  const systemPrompt = `You are a helpful read-only workspace assistant. The current workspace is named ${JSON.stringify(path.basename(workspaceRoot))}. `
     + 'You can inspect visible workspace files with list_files and read_file. '
     + 'For questions about files or code, use those tools before claiming the files are unavailable. '
+    + 'Use workspace-relative file paths in answers; never reveal absolute local path prefixes. '
     + 'Only describe file contents you have actually read. Never modify files or run commands.';
   const tools = await workspaceTools(workspaceRoot);
   if (values.slack) {
@@ -158,10 +163,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
     try {
-      process.stderr.write(`Slack workspace files: ${workspaceRoot}\n`);
+      process.stderr.write(`Slack workspace files: ${path.basename(workspaceRoot)}\n`);
       await new SlackBot(config, () => new Agent(model, tools, {
         maxSteps, maxRetries, onRetry, contextBudget, systemPrompt,
-      })).run(controller.signal);
+      }), fetch, text => safeOutput(text, workspaceRoot, [workspace])).run(controller.signal);
       return 0;
     } finally {
       process.off('SIGINT', stop);
@@ -177,14 +182,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const store = await SessionStore.create(file, workspace, provider, model.model);
     await store.load(agent);
     agent.onChange = current => store.save(current);
-    process.stderr.write(`session: ${store.file}\n`);
+    process.stderr.write(`session: ${safeOutput(store.file, workspaceRoot, [workspace])}\n`);
   }
   if (positionals.length) {
     printed = false;
+    outputStream = streaming ? new SafeOutputStream(workspaceRoot, text => process.stdout.write(text), [workspace]) : undefined;
     try {
       const answer = await agent.run(positionals.join(' '));
-      process.stdout.write(streaming ? '\n' : `${answer}\n`);
+      outputStream?.finish();
+      process.stdout.write(streaming ? '\n' : `${safeOutput(answer, workspaceRoot, [workspace])}\n`);
     } catch (error) {
+      outputStream?.finish();
       if (printed) process.stdout.write('\n');
       throw error;
     }
@@ -199,12 +207,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       if (['exit', 'quit'].includes(prompt.trim().toLowerCase())) return 0;
       if (!prompt.trim()) continue;
       printed = false;
+      outputStream = streaming ? new SafeOutputStream(workspaceRoot, text => process.stdout.write(text), [workspace]) : undefined;
       try {
         const answer = await agent.run(prompt);
-        process.stdout.write(streaming ? '\n' : `${answer}\n`);
+        outputStream?.finish();
+        process.stdout.write(streaming ? '\n' : `${safeOutput(answer, workspaceRoot, [workspace])}\n`);
       } catch (error) {
+        outputStream?.finish();
         if (printed) process.stdout.write('\n');
-        process.stderr.write(`error: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+        process.stderr.write(`error: ${safeOutput(error instanceof Error ? error.message : 'unknown error', workspaceRoot, [workspace])}\n`);
       }
     }
   } finally { readline.close(); }
@@ -212,7 +223,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().then(code => { process.exitCode = code; }).catch(error => {
-    process.stderr.write(`error: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+    process.stderr.write(`error: ${safeOutput(error instanceof Error ? error.message : 'unknown error', process.cwd())}\n`);
     process.exitCode = 1;
   });
 }

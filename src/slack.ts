@@ -107,16 +107,19 @@ export class SlackBot {
   private readonly config: SlackConfig;
   private readonly makeAgent: (conversation: string) => SlackAgent;
   private readonly fetcher: typeof fetch;
+  private readonly safe: (text: string) => string;
   private botUserId = '';
   private teamId = '';
   private readonly agents = new Map<string, SlackAgent>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly seen = new Map<string, number>();
 
-  constructor(config: SlackConfig, makeAgent: (conversation: string) => SlackAgent, fetcher: typeof fetch = fetch) {
+  constructor(config: SlackConfig, makeAgent: (conversation: string) => SlackAgent,
+              fetcher: typeof fetch = fetch, safe: (text: string) => string = text => text) {
     this.config = config;
     this.makeAgent = makeAgent;
     this.fetcher = fetcher;
+    this.safe = safe;
   }
 
   private async api(method: 'auth.test' | 'apps.connections.open' | 'chat.postMessage',
@@ -145,10 +148,11 @@ export class SlackBot {
   }
 
   private async post(channel: string, text: string, threadTs?: string): Promise<void> {
-    if (!text.trim()) return;
-    for (let offset = 0; offset < text.length; offset += 3500) {
+    const answer = this.safe(text);
+    if (!answer.trim()) return;
+    for (let offset = 0; offset < answer.length; offset += 3500) {
       await this.api('chat.postMessage', this.config.botToken, {
-        channel, text: text.slice(offset, offset + 3500),
+        channel, text: answer.slice(offset, offset + 3500),
         ...(threadTs ? { thread_ts: threadTs } : {}), unfurl_links: false, unfurl_media: false,
       });
     }
@@ -187,7 +191,7 @@ export class SlackBot {
       this.agents.set(key, agent);
       try { await this.post(event.channel as string, await agent.run(text), rootTs); }
       catch (error) {
-        process.stderr.write(`Slack turn failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+        process.stderr.write(`Slack turn failed: ${this.safe(error instanceof Error ? error.message : 'unknown error')}\n`);
         await this.post(event.channel as string, '处理失败，请查看 glass-agent 的终端日志。', rootTs);
       }
     });
@@ -241,7 +245,7 @@ export class SlackBot {
               if (frame.type === 'disconnect') { socket.close(); return; }
             } catch { return; }
             void this.handleEnvelope(data, ack => socket.send(ack)).catch(error => {
-              process.stderr.write(`Slack event failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+              process.stderr.write(`Slack event failed: ${this.safe(error instanceof Error ? error.message : 'unknown error')}\n`);
             });
           });
           const onClose = (): void => { signal.removeEventListener('abort', onAbort); resolve(); };
@@ -255,7 +259,7 @@ export class SlackBot {
         });
       } catch (error) {
         if (error instanceof SlackApiError && ['invalid_auth', 'not_authed', 'missing_scope', 'token_revoked'].includes(error.code)) throw error;
-        if (!signal.aborted) process.stderr.write(`Slack reconnecting: ${error instanceof Error ? error.message : 'unknown error'}\n`);
+        if (!signal.aborted) process.stderr.write(`Slack reconnecting: ${this.safe(error instanceof Error ? error.message : 'unknown error')}\n`);
       }
       if (signal.aborted) break;
       await new Promise<void>(resolve => {

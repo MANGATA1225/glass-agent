@@ -19,8 +19,9 @@ test('CLI defaults to memory-only and saves only when requested', async t => {
   };
   try {
     assert.equal(await main(['--provider', 'openai', '--workspace', root, 'hello']), 0);
-    assert.match(workspacePrompt, /current workspace root/);
-    assert.ok(workspacePrompt.includes(root));
+    assert.match(workspacePrompt, /current workspace is named/);
+    assert.ok(workspacePrompt.includes(path.basename(root)));
+    assert.ok(!workspacePrompt.includes(root));
     assert.match(workspacePrompt, /list_files and read_file/);
     await assert.rejects(stat(path.join(root, '.glass-agent')), /ENOENT/);
     assert.equal(await main(['--provider', 'openai', '--workspace', root, '--save', 'hello']), 0);
@@ -54,6 +55,35 @@ test('one-shot --stream prints deltas once and ends with a newline', async t => 
     assert.equal(output.join(''), 'hello\n');
   } finally {
     process.stdout.write = previousWrite;
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousKey;
+  }
+});
+
+test('CLI omits workspace path prefixes from a model answer and session notice', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-private-cli-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousKey = process.env.OPENAI_API_KEY;
+  const previousFetch = globalThis.fetch;
+  const previousOut = process.stdout.write;
+  const previousErr = process.stderr.write;
+  const output: string[] = [];
+  const errors: string[] = [];
+  process.env.OPENAI_API_KEY = 'synthetic-key';
+  globalThis.fetch = async () => Response.json({ choices: [{ message: {
+    role: 'assistant', content: `see ${root}/src/agent.ts`,
+  }, finish_reason: 'stop' }] });
+  process.stdout.write = ((chunk: string | Uint8Array) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => { errors.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    assert.equal(await main(['--provider', 'openai', '--workspace', root, '--save', 'where']), 0);
+    assert.equal(output.join(''), `see ${path.basename(root)}/src/agent.ts\n`);
+    assert.ok(errors.join('').includes(`session: ${path.basename(root)}/.glass-agent/sessions/`));
+    assert.ok(!errors.join('').includes(root));
+  } finally {
+    process.stdout.write = previousOut;
+    process.stderr.write = previousErr;
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousKey;

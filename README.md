@@ -13,7 +13,7 @@ npm start -- --provider chatgpt --model '上一步返回的模型 slug' --worksp
 ```
 
 默认 provider 是 `chatgpt`，需要先登录，再选择账号模型目录返回的 slug。一次性提问可在末尾加问题。不传问题时进入交互模式，输入 `exit` 退出。
-`--workspace` 指定 Agent 能查看的目录；省略时使用启动命令所在目录。程序会把该目录的实际绝对路径告诉模型；模型需要调用 `list_files` 和 `read_file` 才能查看文件名和代码内容。
+`--workspace` 指定 Agent 能查看的目录；省略时使用启动命令所在目录。程序只把工作区名称告诉模型；模型需要调用 `list_files` 和 `read_file` 才能查看文件名和代码内容。终端与 Slack 回复会把工作区绝对路径转换为以工作区名称开头的路径，用户主目录下的其他路径以 `~` 开头显示，其他常见本机绝对路径显示为 `[local path]`；流式输出也会在发出文字前处理路径。
 
 ## ChatGPT 套餐授权
 
@@ -41,7 +41,7 @@ glass-agent 可以在本机连接 Slack，接收允许用户发来的 DM，以�
 4. 使用已授权的 ChatGPT 模型启动 Bot：
 
    ```sh
-   npm start -- --provider chatgpt --model '模型 slug' --workspace /Users/zhuanz/glass-agent --slack
+   npm start -- --provider chatgpt --model '模型 slug' --workspace . --slack
    ```
 
 Bot 会自动调用 `auth.test` 确认自己的用户 ID。DM 在同一运行进程里共享上下文；频道中的每个根消息线程各有独立上下文。当前 Slack 会话只保存在内存中，进程重启后重新开始；此入口只处理文字消息，不下载 Slack 附件。Agent 仍只能调用 `list_files` 和 `read_file`，发送回答由 Slack 适配器完成。
@@ -103,6 +103,7 @@ npm test
 | `src/retry.ts` | 有界重试与退避策略 |
 | `src/tools.ts` | 工作区只读文件工具 |
 | `src/models.ts` | Chat Completions 适配器 |
+| `src/output.ts` | 终端流式输出与 Slack 回复的本地路径处理 |
 | `src/chatgpt-auth.ts` | ChatGPT OAuth、OIDC 校验、私有凭据和自动续期 |
 | `src/chatgpt-model.ts` | ChatGPT 模型目录与 Responses 流、工具调用适配 |
 | `src/slack.ts` | Slack Socket Mode、用户白名单、会话路由与消息投递 |

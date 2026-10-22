@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { safeOutput } from '../src/output.ts';
 import { initSlackConfig, loadSlackConfig, SlackBot } from '../src/slack.ts';
 import type { SlackAgent, SlackConfig } from '../src/slack.ts';
 
@@ -98,4 +99,22 @@ test('Slack bot serializes turns within one conversation', async () => {
   release();
   await Promise.all([first, second]);
   assert.deepEqual(order, ['start first', 'end first', 'start second', 'end second']);
+});
+
+test('Slack replies omit the local workspace prefix', async () => {
+  const root = '/Users/example/glass-agent';
+  const config: SlackConfig = { appToken: 'xapp-1-test', botToken: 'xoxb-1-test',
+    allowedUsers: new Set(['U123']), allowedChannels: new Set() };
+  const posted: string[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    if (String(url).endsWith('/auth.test')) return Response.json({ ok: true, user_id: 'UBOT', team_id: 'T123' });
+    posted.push((JSON.parse(String(init?.body)) as { text: string }).text);
+    return Response.json({ ok: true });
+  };
+  const bot = new SlackBot(config, () => ({ run: async () => `read ${root}/src/agent.ts` }),
+    fetcher, text => safeOutput(text, root));
+  await bot.initialize();
+  await bot.handleEnvelope(envelope('E12', { type: 'message', channel_type: 'im',
+    channel: 'D123', user: 'U123', text: 'where?', ts: '12.0' }), () => undefined);
+  assert.deepEqual(posted, ['read glass-agent/src/agent.ts']);
 });
