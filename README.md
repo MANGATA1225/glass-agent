@@ -23,6 +23,29 @@ npm start -- --provider chatgpt --model '上一步返回的模型 slug' --worksp
 
 可参考 OpenAI 官方文档：[登录授权](https://developers.openai.com/siwc/token-sharing-open-source/sign-in)、[模型与推理](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference)、[当前限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)。
 
+## Slack Bot（Socket Mode）
+
+glass-agent 可以在本机连接 Slack，接收允许用户发来的 DM，以及频道里的显式 @提及，然后用现有 ChatGPT 模型和只读工作区工具回答。使用 [Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)，无需公网域名、ngrok、Request URL 或 Signing Secret。参考包中的 Kepler HTTP gateway 配置不适用于这个本地入口。
+
+1. 在 [Slack App 管理页](https://api.slack.com/apps)创建 App，可导入 [Manifest](examples/slack-app-manifest.yaml)。确认启用了 Socket Mode，Bot scopes 至少有 `app_mentions:read`、`im:history`、`chat:write`，Bot events 为 `app_mention`、`message.im`。修改 scopes 或事件后安装／重新安装到你的 Slack workspace。频道中使用时还需邀请 Bot 加入频道。
+2. 在 **Basic Information → App-Level Tokens** 生成带 `connections:write` scope 的 `xapp-...` token；在 **OAuth & Permissions → Bot User OAuth Token** 复制 `xoxb-...` token。取得你自己的 Slack **member ID**（`U...` 或 `W...`），不是 App ID、Bot ID 或 workspace ID。
+3. 创建只在本机保存的配置文件，然后编辑它：
+
+   ```sh
+   cd /Users/zhuanz/glass-agent
+   npm start -- --slack-init
+   nano ~/.config/glass-agent/slack.env
+   ```
+
+   把 `SLACK_APP_TOKEN`、`SLACK_BOT_TOKEN`、`SLACK_ALLOWED_USERS` 的占位值替换成自己的值；多个用户 ID 用逗号分隔。`SLACK_ALLOWED_CHANNELS` 可选，填 `C...`／`G...` 频道 ID 可限制频道提及；留空时允许已加入频道中的允许用户提及。这个文件默认权限是 `0600`，位于 Agent 可读工作区之外，不要提交到 Git 或在聊天中发送 token。
+4. 使用已授权的 ChatGPT 模型启动 Bot：
+
+   ```sh
+   npm start -- --provider chatgpt --model '模型 slug' --workspace /Users/zhuanz/glass-agent --slack
+   ```
+
+Bot 会自动调用 `auth.test` 确认自己的用户 ID。DM 在同一运行进程里共享上下文；频道中的每个根消息线程各有独立上下文。当前 Slack 会话只保存在内存中，进程重启后重新开始；此入口只处理文字消息，不下载 Slack 附件。Agent 仍只能调用 `list_files` 和 `read_file`，发送回答由 Slack 适配器完成。
+
 ## API Key provider
 
 原有 OpenAI Chat Completions API Key 模式仍可单独使用：
@@ -82,6 +105,7 @@ npm test
 | `src/models.ts` | Chat Completions 适配器 |
 | `src/chatgpt-auth.ts` | ChatGPT OAuth、OIDC 校验、私有凭据和自动续期 |
 | `src/chatgpt-model.ts` | ChatGPT 模型目录与 Responses 流、工具调用适配 |
+| `src/slack.ts` | Slack Socket Mode、用户白名单、会话路由与消息投递 |
 | `src/qoder.ts` | Qoder PAT 交换、模型发现、COSY 签名与流解析 |
 | `src/session.ts` | 原子写入、恢复会话 |
 | `src/cli.ts` | 命令行入口 |

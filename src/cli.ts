@@ -10,6 +10,7 @@ import { ChatCompletionsModel } from './models.ts';
 import { OFFICIAL_ENDPOINTS, QoderModel } from './qoder.ts';
 import { withRetry } from './retry.ts';
 import { SessionStore } from './session.ts';
+import { DEFAULT_SLACK_CONFIG, initSlackConfig, loadSlackConfig, SlackBot } from './slack.ts';
 import { workspaceTools } from './tools.ts';
 
 const HELP = `glass-agent: read-only workspace agent
@@ -23,6 +24,9 @@ Options:
   --model NAME           Model key or name
   --base-url URL         API-key OpenAI root or official Qoder endpoint
   --list-models          List enabled ChatGPT or Qoder models
+  --slack-init           Create private Slack config template and show its path
+  --slack                Run a Slack bot through Socket Mode (ChatGPT provider)
+  --slack-config PATH    Slack config file (default: ~/.config/glass-agent/slack.env)
   --max-steps N          Maximum model calls per question (default: 8)
   --max-retries N        Retries for transient model failures (default: 2; 0 disables)
   --context-budget N     Approximate character budget (default: 120000)
@@ -55,6 +59,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     workspace: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
     'base-url': { type: 'string' }, 'list-models': { type: 'boolean' }, login: { type: 'boolean' },
+    slack: { type: 'boolean' }, 'slack-init': { type: 'boolean' }, 'slack-config': { type: 'string' },
     'max-steps': { type: 'string' }, 'max-retries': { type: 'string' }, 'context-budget': { type: 'string' },
     save: { type: 'boolean' }, session: { type: 'string' }, continue: { type: 'boolean' },
     'no-save': { type: 'boolean' }, stream: { type: 'boolean' },
@@ -67,6 +72,24 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (sessionOptions > 1) throw new Error('choose only one session option');
   const provider = values.provider ?? process.env.GLASS_PROVIDER ?? 'chatgpt';
   if (!['chatgpt', 'openai', 'qoder'].includes(provider)) throw new Error('provider must be chatgpt, openai, or qoder');
+  const workspace = path.resolve(values.workspace ?? process.cwd());
+  const slackConfigFile = path.resolve(values['slack-config'] ?? DEFAULT_SLACK_CONFIG);
+  if (values['slack-init']) {
+    if (values.slack || values.login || values['list-models'] || positionals.length) {
+      throw new Error('--slack-init cannot be combined with a run or question');
+    }
+    const relative = path.relative(workspace, slackConfigFile);
+    if (relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' &&
+        !path.isAbsolute(relative) && relative.split(path.sep).every(part => !part.startsWith('.'))) {
+      throw new Error('Slack config must be outside the agent-readable workspace');
+    }
+    process.stdout.write(`Slack config template created: ${await initSlackConfig(slackConfigFile)}\n`);
+    return 0;
+  }
+  if (values.slack && (provider !== 'chatgpt' || values.login || values['list-models'] || positionals.length ||
+      values.save || values.session || values.continue)) {
+    throw new Error('--slack requires ChatGPT, a model, and no question or persistent-session option');
+  }
   if (provider === 'chatgpt' && values['base-url']) throw new Error('--base-url is unavailable for ChatGPT plan credentials');
   if (values.login) {
     if (provider !== 'chatgpt' || values['list-models'] || positionals.length) throw new Error('--login is only for ChatGPT and cannot include a question');
@@ -74,7 +97,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`ChatGPT authorized${session.email ? ` for ${session.email}` : ''}. Credentials saved outside the workspace.\n`);
     return 0;
   }
-  const workspace = path.resolve(values.workspace ?? process.cwd());
+  if (values.slack) {
+    const relative = path.relative(workspace, slackConfigFile);
+    if (relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' &&
+        !path.isAbsolute(relative) && relative.split(path.sep).every(part => !part.startsWith('.'))) {
+      throw new Error('Slack config must be outside the agent-readable workspace');
+    }
+  }
   if (provider === 'chatgpt' && !values['list-models']) {
     const relativeCredential = path.relative(workspace, new ChatGPTCredentials().file);
     if (relativeCredential && !relativeCredential.startsWith(`..${path.sep}`) && relativeCredential !== '..' &&
@@ -120,7 +149,26 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     + 'You can inspect visible workspace files with list_files and read_file. '
     + 'For questions about files or code, use those tools before claiming the files are unavailable. '
     + 'Only describe file contents you have actually read. Never modify files or run commands.';
-  const agent = new Agent(model, await workspaceTools(workspaceRoot), {
+  const tools = await workspaceTools(workspaceRoot);
+  if (values.slack) {
+    await new ChatGPTCredentials().load();
+    const config = await loadSlackConfig(slackConfigFile);
+    const controller = new AbortController();
+    const stop = (): void => controller.abort();
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    try {
+      process.stderr.write(`Slack workspace files: ${workspaceRoot}\n`);
+      await new SlackBot(config, () => new Agent(model, tools, {
+        maxSteps, maxRetries, onRetry, contextBudget, systemPrompt,
+      })).run(controller.signal);
+      return 0;
+    } finally {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+    }
+  }
+  const agent = new Agent(model, tools, {
     maxSteps, maxRetries, onRetry, onText, contextBudget, systemPrompt,
   });
   if (values.save || values.session || values.continue) {
