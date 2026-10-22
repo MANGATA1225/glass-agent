@@ -105,21 +105,24 @@ class SlackApiError extends Error {
 
 export class SlackBot {
   private readonly config: SlackConfig;
-  private readonly makeAgent: (conversation: string) => SlackAgent;
+  private readonly makeAgent: (conversation: string) => SlackAgent | Promise<SlackAgent>;
   private readonly fetcher: typeof fetch;
   private readonly safe: (text: string) => string;
+  private readonly reset?: (conversation: string) => Promise<void>;
   private botUserId = '';
   private teamId = '';
   private readonly agents = new Map<string, SlackAgent>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly seen = new Map<string, number>();
 
-  constructor(config: SlackConfig, makeAgent: (conversation: string) => SlackAgent,
-              fetcher: typeof fetch = fetch, safe: (text: string) => string = text => text) {
+  constructor(config: SlackConfig, makeAgent: (conversation: string) => SlackAgent | Promise<SlackAgent>,
+              fetcher: typeof fetch = fetch, safe: (text: string) => string = text => text,
+              reset?: (conversation: string) => Promise<void>) {
     this.config = config;
     this.makeAgent = makeAgent;
     this.fetcher = fetcher;
     this.safe = safe;
+    this.reset = reset;
   }
 
   private async api(method: 'auth.test' | 'apps.connections.open' | 'chat.postMessage',
@@ -187,9 +190,20 @@ export class SlackBot {
     const key = dm ? `${this.teamId}:${event.channel}` : `${this.teamId}:${event.channel}:${rootTs}`;
     const previous = this.queues.get(key) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(async () => {
-      const agent = this.agents.get(key) ?? this.makeAgent(key);
-      this.agents.set(key, agent);
-      try { await this.post(event.channel as string, await agent.run(text), rootTs); }
+      try {
+        if (dm && text.toLowerCase() === '!new' && this.reset) {
+          await this.reset(key);
+          this.agents.delete(key);
+          await this.post(event.channel as string, '已开启新会话。');
+          return;
+        }
+        let agent = this.agents.get(key);
+        if (!agent) {
+          agent = await this.makeAgent(key);
+          this.agents.set(key, agent);
+        }
+        await this.post(event.channel as string, await agent.run(text), rootTs);
+      }
       catch (error) {
         process.stderr.write(`Slack turn failed: ${this.safe(error instanceof Error ? error.message : 'unknown error')}\n`);
         await this.post(event.channel as string, '处理失败，请查看 glass-agent 的终端日志。', rootTs);

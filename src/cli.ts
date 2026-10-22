@@ -12,6 +12,7 @@ import { OFFICIAL_ENDPOINTS, QoderModel } from './qoder.ts';
 import { withRetry } from './retry.ts';
 import { SessionStore } from './session.ts';
 import { DEFAULT_SLACK_CONFIG, initSlackConfig, loadSlackConfig, SlackBot } from './slack.ts';
+import { SlackSessions } from './slack-session.ts';
 import { workspaceTools } from './tools.ts';
 
 const HELP = `glass-agent: read-only workspace agent
@@ -147,6 +148,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (provider === 'qoder' && !modelName) throw new Error('Qoder requires --model; run --provider qoder --list-models');
+  if (values.slack && !modelName) throw new Error('Slack requires --model; run --provider chatgpt --list-models');
   const workspaceRoot = await realpath(workspace);
   displayWorkspace = workspaceRoot;
   const systemPrompt = `You are a helpful read-only workspace assistant. The current workspace is named ${JSON.stringify(path.basename(workspaceRoot))}. `
@@ -161,15 +163,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (values.slack) {
     await new ChatGPTCredentials().load();
     const config = await loadSlackConfig(slackConfigFile);
+    const sessions = await SlackSessions.create(workspaceRoot, model.model);
     const controller = new AbortController();
     const stop = (): void => controller.abort();
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
     try {
       process.stderr.write(`Slack workspace files: ${path.basename(workspaceRoot)}\n`);
-      await new SlackBot(config, () => new Agent(model, tools, {
+      process.stderr.write(`Slack sessions: ${path.basename(workspaceRoot)}/.glass-agent/sessions/slack/\n`);
+      await new SlackBot(config, conversation => sessions.open(conversation, () => new Agent(model, tools, {
         maxSteps, maxRetries, onRetry, contextBudget, systemPrompt,
-      }), fetch, text => safeOutput(text, workspaceRoot, [workspace])).run(controller.signal);
+      })), fetch, text => safeOutput(text, workspaceRoot, [workspace]),
+      conversation => sessions.reset(conversation)).run(controller.signal);
       return 0;
     } finally {
       process.off('SIGINT', stop);

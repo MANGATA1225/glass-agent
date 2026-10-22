@@ -4,6 +4,19 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Agent } from './agent.ts';
 import type { Message } from './types.ts';
+import { redactSecrets } from './secrets.ts';
+
+interface SessionOptions { redactSecrets?: boolean }
+
+function redactMessage(message: Message): Message {
+  return {
+    ...message,
+    content: message.content === null ? null : redactSecrets(message.content),
+    ...(message.tool_calls ? { tool_calls: message.tool_calls.map(call => ({ ...call,
+      function: { ...call.function, arguments: redactSecrets(call.function.arguments) },
+    })) } : {}),
+  };
+}
 
 function expanded(input: string): string {
   return path.resolve(input.startsWith('~/') ? path.join(os.homedir(), input.slice(2)) : input);
@@ -22,15 +35,18 @@ export class SessionStore {
   readonly workspace: string;
   readonly provider: string;
   readonly model: string;
-  private constructor(file: string, workspace: string, provider: string, model: string) {
+  private readonly redact: boolean;
+  private constructor(file: string, workspace: string, provider: string, model: string, options: SessionOptions) {
     this.file = expanded(file);
     this.workspace = workspace;
     this.provider = provider;
     this.model = model;
+    this.redact = options.redactSecrets ?? false;
   }
 
-  static async create(file: string, workspace: string, provider: string, model: string): Promise<SessionStore> {
-    return new SessionStore(file, await realpath(workspace), provider, model);
+  static async create(file: string, workspace: string, provider: string, model: string,
+                      options: SessionOptions = {}): Promise<SessionStore> {
+    return new SessionStore(file, await realpath(workspace), provider, model, options);
   }
 
   static async newPath(workspace: string): Promise<string> {
@@ -79,9 +95,22 @@ export class SessionStore {
       }
       agent.model.sessionId = state.remote_session_id;
     }
-    agent.history = history as Message[];
-    agent.summary = state.summary;
+    agent.history = this.redact ? (history as Message[]).map(redactMessage) : history as Message[];
+    agent.summary = this.redact ? redactSecrets(state.summary) : state.summary;
     agent.firstKeptIndex = kept;
+  }
+
+  async archive(): Promise<boolean> {
+    await checkLinks(this.file);
+    let info;
+    try { info = await lstat(this.file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+    if (!info.isFile()) throw new Error('session path is not a regular file');
+    const directory = path.join(path.dirname(this.file), 'archive');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await checkLinks(directory);
+    await rename(this.file, path.join(directory, `${path.basename(this.file, '.json')}-${randomUUID()}.json`));
+    return true;
   }
 
   async save(agent: Agent): Promise<void> {
@@ -89,7 +118,9 @@ export class SessionStore {
     await mkdir(path.dirname(this.file), { recursive: true, mode: 0o700 });
     await checkLinks(this.file);
     const state = { version: 1, workspace: this.workspace, provider: this.provider, model: this.model,
-      history: agent.history, summary: agent.summary, first_kept_index: agent.firstKeptIndex,
+      history: this.redact ? agent.history.map(redactMessage) : agent.history,
+      summary: this.redact ? redactSecrets(agent.summary) : agent.summary,
+      first_kept_index: agent.firstKeptIndex,
       ...(agent.model.sessionId ? { remote_session_id: agent.model.sessionId } : {}) };
     const temporary = path.join(path.dirname(this.file), `.session-${randomUUID()}.tmp`);
     const handle = await open(temporary, 'wx', 0o600);

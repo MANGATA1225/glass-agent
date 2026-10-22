@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { safeOutput } from '../src/output.ts';
+import { Agent } from '../src/agent.ts';
+import { SlackSessions } from '../src/slack-session.ts';
 import { initSlackConfig, loadSlackConfig, SlackBot } from '../src/slack.ts';
 import type { SlackAgent, SlackConfig } from '../src/slack.ts';
+import type { Message, Model, ToolDeclaration } from '../src/types.ts';
 
 test('Slack config template is private and requires real tokens and allowed users', async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'glass-slack-config-'));
@@ -117,4 +120,71 @@ test('Slack replies omit the local workspace prefix', async () => {
   await bot.handleEnvelope(envelope('E12', { type: 'message', channel_type: 'im',
     channel: 'D123', user: 'U123', text: 'where?', ts: '12.0' }), () => undefined);
   assert.deepEqual(posted, ['read glass-agent/src/agent.ts']);
+});
+
+test('Slack DM resumes after restart, separates threads, and archives on !new', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-slack-resume-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessions = await SlackSessions.create(root, 'fake-model');
+  const requests: Message[][] = [];
+  const model: Model = { model: 'fake-model', complete: async (messages: Message[], _tools: ToolDeclaration[]) => {
+    requests.push(messages);
+    return { message: { role: 'assistant', content: `reply ${requests.length}` } };
+  } };
+  const config: SlackConfig = { appToken: 'xapp-1-test', botToken: 'xoxb-1-test',
+    allowedUsers: new Set(['U123']), allowedChannels: new Set() };
+  const posted: string[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    if (String(url).endsWith('/auth.test')) return Response.json({ ok: true, user_id: 'UBOT', team_id: 'T123' });
+    posted.push((JSON.parse(String(init?.body)) as { text: string }).text);
+    return Response.json({ ok: true });
+  };
+  const createBot = (): SlackBot => new SlackBot(config,
+    key => sessions.open(key, () => new Agent(model, [])), fetcher, text => text,
+    key => sessions.reset(key));
+  const first = createBot();
+  await first.initialize();
+  const dm = { type: 'message', channel_type: 'im', channel: 'D123', user: 'U123', ts: '1.0' };
+  await first.handleEnvelope(envelope('E21', { ...dm, text: 'first' }), () => undefined);
+  const file = sessions.fileFor('T123:D123');
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).history.length, 2);
+
+  const restarted = createBot();
+  await restarted.initialize();
+  await restarted.handleEnvelope(envelope('E22', { ...dm, text: 'follow up', ts: '2.0' }), () => undefined);
+  assert.deepEqual(requests[1]!.filter(item => item.role === 'user').map(item => item.content), ['first', 'follow up']);
+  await restarted.handleEnvelope(envelope('E23', { type: 'app_mention', channel: 'C123', user: 'U123',
+    text: '<@UBOT> channel question', ts: '3.0' }), () => undefined);
+  assert.deepEqual(requests[2]!.filter(item => item.role === 'user').map(item => item.content), ['channel question']);
+  assert.notEqual(sessions.fileFor('T123:D123'), sessions.fileFor('T123:C123:3.0'));
+
+  const again = createBot();
+  await again.initialize();
+  await again.handleEnvelope(envelope('E23b', { type: 'app_mention', channel: 'C123', user: 'U123',
+    text: '<@UBOT> channel follow up', ts: '3.1', thread_ts: '3.0' }), () => undefined);
+  assert.deepEqual(requests[3]!.filter(item => item.role === 'user').map(item => item.content),
+    ['channel question', 'channel follow up']);
+
+  await restarted.handleEnvelope(envelope('E24', { ...dm, text: '!new', ts: '4.0' }), () => undefined);
+  assert.equal(posted.at(-1), '已开启新会话。');
+  await assert.rejects(stat(file), /ENOENT/);
+  assert.equal((await readdir(path.join(path.dirname(file), 'archive'))).length, 1);
+  await restarted.handleEnvelope(envelope('E25', { ...dm, text: 'fresh', ts: '5.0' }), () => undefined);
+  assert.deepEqual(requests[4]!.filter(item => item.role === 'user').map(item => item.content), ['fresh']);
+});
+
+test('Slack session snapshots redact known credentials', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-slack-secret-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessions = await SlackSessions.create(root, 'fake-model');
+  const model: Model = { model: 'fake-model', complete: async () => ({
+    message: { role: 'assistant', content: 'done' },
+  }) };
+  const agent = await sessions.open('T123:D123', () => new Agent(model, []));
+  const fake = `ghp_${'A'.repeat(24)}`;
+  await agent.run(`hello ${fake}`);
+  const saved = await readFile(sessions.fileFor('T123:D123'), 'utf8');
+  assert.ok(!saved.includes(fake));
+  assert.match(saved, /\[REDACTED\]/);
 });

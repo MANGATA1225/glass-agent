@@ -1,11 +1,13 @@
 # glass-agent
 
+[![中文](https://img.shields.io/badge/语言-中文-blue)](README.md) [![English](https://img.shields.io/badge/Language-English-lightgrey)](README.en.md)
+
 使用 TypeScript 和 Node.js 24+ 实现的轻量只读 Agent。模型循环、上下文压缩、会话恢复、工作区文件工具、日期工具和 ChatGPT、Qoder 适配均在 `src/` 中。运行时使用 `jose` 校验 ChatGPT 的 OIDC ID token；TypeScript 仅用于类型检查。
 
 ## 安装与运行
 
 ```sh
-cd /Users/zhuanz/glass-agent
+cd glass-agent
 npm ci
 npm start -- --provider chatgpt --login
 npm start -- --provider chatgpt --list-models
@@ -32,7 +34,7 @@ glass-agent 可以在本机连接 Slack，接收允许用户发来的 DM，以�
 3. 创建只在本机保存的配置文件，然后编辑它：
 
    ```sh
-   cd /Users/zhuanz/glass-agent
+   cd glass-agent
    npm start -- --slack-init
    nano ~/.config/glass-agent/slack.env
    ```
@@ -44,7 +46,7 @@ glass-agent 可以在本机连接 Slack，接收允许用户发来的 DM，以�
    npm start -- --provider chatgpt --model '模型 slug' --workspace . --slack
    ```
 
-Bot 会自动调用 `auth.test` 确认自己的用户 ID。DM 在同一运行进程里共享上下文；频道中的每个根消息线程各有独立上下文。当前 Slack 会话只保存在内存中，进程重启后重新开始；此入口只处理文字消息，不下载 Slack 附件。Agent 仍只能调用 `list_files` 和 `read_file`，发送回答由 Slack 适配器完成。
+Bot 会自动调用 `auth.test` 确认自己的用户 ID。Slack 会话默认保存在工作区 `.glass-agent/sessions/slack/`，首次成功回答后生成文件，后续每轮成功回答后原子更新，权限为 `0600`。私信用 Slack workspace ID 和 DM 频道 ID 定位一段连续会话；频道消息用 workspace ID、频道 ID 和根消息时间戳定位，每个线程各有独立上下文。关闭 Bot 后，用**相同的 `--workspace` 和 `--model`** 再次启动，继续在原私信或线程发消息即可自动恢复，无需 `--continue`。私信发送 `!new` 可把旧会话移入 `slack/archive/` 并开始新会话；频道需要开启新话题时，发送新的根消息并 @Bot。启动前已经发生、仅保存在旧进程内存里的对话无法补回。此入口只处理文字消息，不下载 Slack 附件。Agent 仍只能调用 `list_files`、`read_file` 和 `current_date`，发送回答由 Slack 适配器完成。同一工作区请只运行一个 Slack Bot 实例。
 
 ## API Key provider
 
@@ -73,7 +75,7 @@ npm start -- --provider qoder --model '上一步返回的模型 key' --workspace
 
 ## 会话与上下文
 
-默认会话只保存在内存中，运行 Agent 不写本地文件。明确需要持久化时传 `--save`；会话以权限 `0600` 写到工作区 `.glass-agent/sessions/<id>.json`。`--continue` 恢复该工作区最近的会话，`--session 路径` 指定会话文件；这两个选项也会继续保存。恢复时工作区、provider 和模型必须一致。会话格式与先前 Python 版本的 JSON 文件兼容，包含原始问答和工具结果，但不包含 API Key/PAT。
+终端交互和一次性提问默认会话只保存在内存中，运行 Agent 不写本地文件。明确需要持久化时传 `--save`；会话以权限 `0600` 写到工作区 `.glass-agent/sessions/<id>.json`。`--continue` 恢复该工作区最近的会话，`--session 路径` 指定会话文件；这两个选项也会继续保存。恢复时工作区、provider 和模型必须一致。Slack Bot 会话则自动保存和恢复，并在写入时遮盖已识别的常见凭据格式。会话格式与先前 Python 版本的 JSON 文件兼容，包含原始问答和工具结果。
 
 ```sh
 npm start -- --provider qoder --model '模型 key' --workspace . --save
@@ -88,7 +90,7 @@ npm start -- --provider qoder --model '模型 key' --workspace . --continue
 
 ## 只读权限
 
-Agent 只能注册并调用内置的 `list_files`、`read_file` 和 `current_date`。写工具、Bash 与命令执行工具均被拒绝；模型自行请求未知工具也不会执行。文件工具只能访问工作区内可见的 UTF-8 文件，隐藏文件、`.git`、越界路径和越界符号链接不可读。单个文件上限 1 MiB；`read_file` 使用从 0 开始的字符 `offset` 续读，并在内容进入模型前遮盖常见凭据格式；终端和 Slack 输出也会遮盖这些格式。日期工具只读取系统时钟。`--save`、`--continue` 和 `--session` 是由程序本身写会话文件的显式选项。这里限制的是 Agent 工具权限，不是操作系统级沙箱。
+Agent 只能注册并调用内置的 `list_files`、`read_file` 和 `current_date`。写工具、Bash 与命令执行工具均被拒绝；模型自行请求未知工具也不会执行。文件工具只能访问工作区内可见的 UTF-8 文件，隐藏文件、`.git`、越界路径和越界符号链接不可读。单个文件上限 1 MiB；`read_file` 使用从 0 开始的字符 `offset` 续读，并在内容进入模型前遮盖常见凭据格式；终端和 Slack 输出也会遮盖这些格式。日期工具只读取系统时钟。会话文件由程序本身按上述会话选项或 Slack Bot 模式写入。这里限制的是 Agent 工具权限，不是操作系统级沙箱。
 
 ## 开发
 
@@ -108,6 +110,7 @@ npm test
 | `src/chatgpt-auth.ts` | ChatGPT OAuth、OIDC 校验、私有凭据和自动续期 |
 | `src/chatgpt-model.ts` | ChatGPT 模型目录与 Responses 流、工具调用适配 |
 | `src/slack.ts` | Slack Socket Mode、用户白名单、会话路由与消息投递 |
+| `src/slack-session.ts` | Slack 会话文件定位、自动恢复与归档 |
 | `src/qoder.ts` | Qoder PAT 交换、模型发现、COSY 签名与流解析 |
 | `src/session.ts` | 原子写入、恢复会话 |
 | `src/cli.ts` | 命令行入口 |
