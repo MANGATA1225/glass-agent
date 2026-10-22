@@ -1,4 +1,4 @@
-import { isWorkspaceReadTool } from './tools.ts';
+import { isAllowedReadTool } from './tools.ts';
 import { withRetry } from './retry.ts';
 import { AgentError, ContextLimitExceeded, ModelError, RetryableModelError, StepLimitExceeded, declaration } from './types.ts';
 import type { Completion, Message, Model, Tool, ToolCall, ToolDeclaration } from './types.ts';
@@ -96,7 +96,7 @@ export class Agent {
 
   private checkTools(tools: Tool[]): void {
     if (new Set(tools.map(tool => tool.name)).size !== tools.length) throw new Error('tool names must be unique');
-    if (tools.some(tool => !isWorkspaceReadTool(tool))) throw new Error('only built-in read-only workspace tools are allowed');
+    if (tools.some(tool => !isAllowedReadTool(tool))) throw new Error('only built-in read-only tools are allowed');
   }
 
   private async context(working: Message[], declarations: ToolDeclaration[], active: ActiveContext): Promise<Message[]> {
@@ -272,7 +272,7 @@ export class Agent {
   private async execute(name: string, raw: string, limit: number): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) return `Tool error: unknown tool: ${name}`;
-    if (!isWorkspaceReadTool(tool)) return 'Tool error: this tool is not allowed';
+    if (!isAllowedReadTool(tool)) return 'Tool error: this tool is not allowed';
     try {
       const args = validateArguments(tool.parameters, JSON.parse(raw));
       if (name === 'read_file') args.limit = Math.min(args.limit as number ?? 6000, Math.max(1, limit - 160));

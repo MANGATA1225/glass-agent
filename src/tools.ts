@@ -1,12 +1,13 @@
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import { redactSecrets } from './secrets.ts';
 import type { Tool } from './types.ts';
 
 const issuedTools = new WeakSet<Tool>();
-const names = new Set(['list_files', 'read_file']);
+const names = new Set(['list_files', 'read_file', 'current_date']);
 
-export function isWorkspaceReadTool(tool: Tool): boolean {
+export function isAllowedReadTool(tool: Tool): boolean {
   return names.has(tool.name) && issuedTools.has(tool);
 }
 
@@ -22,7 +23,7 @@ function visibleRelative(root: string, requested: string): string {
   return candidate;
 }
 
-export async function workspaceTools(workspace: string): Promise<Tool[]> {
+export async function workspaceTools(workspace: string, now: () => Date = () => new Date()): Promise<Tool[]> {
   const root = await realpath(workspace);
   if (!(await lstat(root)).isDirectory()) throw new Error('workspace must be a directory');
 
@@ -45,7 +46,7 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
     }
     await visit(root);
     if (!found.length) return '(no visible files)';
-    return found.join('\n') + (found.length >= 100 ? '\n[only first 100 files shown]' : '');
+    return redactSecrets(found.join('\n')) + (found.length >= 100 ? '\n[only first 100 files shown]' : '');
   }
 
   async function readFile(arguments_: Record<string, unknown>): Promise<string> {
@@ -71,7 +72,7 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
       if (!stat.isFile()) throw new Error('file not found');
       if (stat.size > 1024 * 1024) throw new Error('file is larger than 1 MiB');
       const bytes = await handle.readFile();
-      const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      const content = redactSecrets(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
       if (offset >= content.length) return `(no content at offset ${offset}; file has ${content.length} characters)`;
       const end = Math.min(content.length, offset + limit);
       const excerpt = content.slice(offset, end);
@@ -88,6 +89,15 @@ export async function workspaceTools(workspace: string): Promise<Tool[]> {
     { name: 'read_file', description: 'Read up to 6000 characters from one visible UTF-8 file (max 1 MiB). Use offset to continue from the displayed character position.',
       parameters: { type: 'object', properties: { path: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['path'], additionalProperties: false },
       execute: readFile },
+    { name: 'current_date', description: 'Get the current calendar date and weekday in the Asia/Shanghai time zone. Use this for questions about today or the current date.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: () => {
+        const parts = new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long',
+        }).formatToParts(now());
+        const get = (type: Intl.DateTimeFormatPartTypes): string => parts.find(part => part.type === type)?.value ?? '';
+        return `${get('year')}-${get('month')}-${get('day')} (${get('weekday')}), time zone: Asia/Shanghai`;
+      } },
   ];
   for (const tool of tools) {
     issuedTools.add(tool);

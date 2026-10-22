@@ -1,6 +1,6 @@
 # glass-agent
 
-使用 TypeScript 和 Node.js 24+ 实现的轻量只读 Agent。模型循环、上下文压缩、会话恢复、工作区文件工具和 ChatGPT、Qoder 适配均在 `src/` 中。运行时使用 `jose` 校验 ChatGPT 的 OIDC ID token；TypeScript 仅用于类型检查。
+使用 TypeScript 和 Node.js 24+ 实现的轻量只读 Agent。模型循环、上下文压缩、会话恢复、工作区文件工具、日期工具和 ChatGPT、Qoder 适配均在 `src/` 中。运行时使用 `jose` 校验 ChatGPT 的 OIDC ID token；TypeScript 仅用于类型检查。
 
 ## 安装与运行
 
@@ -13,7 +13,7 @@ npm start -- --provider chatgpt --model '上一步返回的模型 slug' --worksp
 ```
 
 默认 provider 是 `chatgpt`，需要先登录，再选择账号模型目录返回的 slug。一次性提问可在末尾加问题。不传问题时进入交互模式，输入 `exit` 退出。
-`--workspace` 指定 Agent 能查看的目录；省略时使用启动命令所在目录。程序只把工作区名称告诉模型；模型需要调用 `list_files` 和 `read_file` 才能查看文件名和代码内容。终端与 Slack 回复会把工作区绝对路径转换为以工作区名称开头的路径，用户主目录下的其他路径以 `~` 开头显示，其他常见本机绝对路径显示为 `[local path]`；流式输出也会在发出文字前处理路径。
+`--workspace` 指定 Agent 能查看的目录；省略时使用启动命令所在目录。程序只把工作区名称告诉模型；模型需要调用 `list_files` 和 `read_file` 才能查看文件名和代码内容。询问当前日期或星期时，模型可调用 `current_date`，按 `Asia/Shanghai` 时区返回实时日期。Agent 的身份名称是 `smart-stella`。终端与 Slack 回复会把工作区绝对路径转换为以工作区名称开头的路径，用户主目录下的其他路径以 `~` 开头显示，其他常见本机绝对路径显示为 `[local path]`；流式输出也会在发出文字前处理路径。
 
 ## ChatGPT 套餐授权
 
@@ -88,7 +88,7 @@ npm start -- --provider qoder --model '模型 key' --workspace . --continue
 
 ## 只读权限
 
-Agent 只能注册并调用内置的 `list_files` 和 `read_file`。写工具、Bash 与命令执行工具均被拒绝；模型自行请求未知工具也不会执行。工具只能访问工作区内可见的 UTF-8 文件，隐藏文件、`.git`、越界路径和越界符号链接不可读。单个文件上限 1 MiB；`read_file` 使用从 0 开始的字符 `offset` 续读。`--save`、`--continue` 和 `--session` 是由程序本身写会话文件的显式选项。这里限制的是 Agent 工具权限，不是操作系统级沙箱。
+Agent 只能注册并调用内置的 `list_files`、`read_file` 和 `current_date`。写工具、Bash 与命令执行工具均被拒绝；模型自行请求未知工具也不会执行。文件工具只能访问工作区内可见的 UTF-8 文件，隐藏文件、`.git`、越界路径和越界符号链接不可读。单个文件上限 1 MiB；`read_file` 使用从 0 开始的字符 `offset` 续读，并在内容进入模型前遮盖常见凭据格式；终端和 Slack 输出也会遮盖这些格式。日期工具只读取系统时钟。`--save`、`--continue` 和 `--session` 是由程序本身写会话文件的显式选项。这里限制的是 Agent 工具权限，不是操作系统级沙箱。
 
 ## 开发
 
@@ -101,9 +101,10 @@ npm test
 | --- | --- |
 | `src/agent.ts` | 模型与工具循环、上下文压缩、只读工具校验 |
 | `src/retry.ts` | 有界重试与退避策略 |
-| `src/tools.ts` | 工作区只读文件工具 |
+| `src/tools.ts` | 工作区只读文件工具和当前日期工具 |
 | `src/models.ts` | Chat Completions 适配器 |
 | `src/output.ts` | 终端流式输出与 Slack 回复的本地路径处理 |
+| `src/secrets.ts` | 常见凭据格式遮盖 |
 | `src/chatgpt-auth.ts` | ChatGPT OAuth、OIDC 校验、私有凭据和自动续期 |
 | `src/chatgpt-model.ts` | ChatGPT 模型目录与 Responses 流、工具调用适配 |
 | `src/slack.ts` | Slack Socket Mode、用户白名单、会话路由与消息投递 |

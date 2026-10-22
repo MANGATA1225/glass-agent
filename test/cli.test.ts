@@ -23,6 +23,10 @@ test('CLI defaults to memory-only and saves only when requested', async t => {
     assert.ok(workspacePrompt.includes(path.basename(root)));
     assert.ok(!workspacePrompt.includes(root));
     assert.match(workspacePrompt, /list_files and read_file/);
+    assert.match(workspacePrompt, /You are smart-stella/);
+    assert.match(workspacePrompt, /我是 smart-stella/);
+    assert.match(workspacePrompt, /Use current_date/);
+    assert.match(workspacePrompt, /Never disclose tokens, API keys, passwords/);
     await assert.rejects(stat(path.join(root, '.glass-agent')), /ENOENT/);
     assert.equal(await main(['--provider', 'openai', '--workspace', root, '--save', 'hello']), 0);
     assert.equal((await readdir(path.join(root, '.glass-agent', 'sessions'))).length, 1);

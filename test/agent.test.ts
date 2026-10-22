@@ -45,6 +45,22 @@ test('only issued read tools run; unknown write calls have no effect', async t =
   await assert.rejects(Promise.resolve().then(() => tools[1]!.execute({ path: '.git/config' })), /visible/);
 });
 
+test('current_date returns the live date in Asia/Shanghai without filesystem access', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'glass-date-'));
+  t.after(async () => { await import('node:fs/promises').then(fs => fs.rm(root, { recursive: true, force: true })); });
+  const tools = await workspaceTools(root, () => new Date('2026-10-21T16:30:00Z'));
+  const dateTool = tools.find(tool => tool.name === 'current_date');
+  assert.ok(dateTool);
+  assert.equal(await dateTool.execute({}), '2026-10-22 (Thursday), time zone: Asia/Shanghai');
+  const model = new SequenceModel([
+    response(null, [{ id: 'date', type: 'function', function: { name: 'current_date', arguments: '{}' } }]),
+    response('Today is 2026-10-22.'),
+  ]);
+  assert.equal(await new Agent(model, tools).run('What is today’s date?'), 'Today is 2026-10-22.');
+  assert.equal(model.requests[1]!.messages.at(-1)!.content,
+    '2026-10-22 (Thursday), time zone: Asia/Shanghai');
+});
+
 test('compaction preserves complete recent tool turn and raw transcript', async () => {
   const model = new SequenceModel([response('summary'), response('done')]);
   const agent = new Agent(model, [], { contextBudget: 1200 });
@@ -150,7 +166,7 @@ test('older tool results are pruned only in model context, while recent results 
     }
   }
   const model = new ReadModel();
-  const agent = new Agent(model, await workspaceTools(root), { contextBudget: 8000 });
+  const agent = new Agent(model, await workspaceTools(root), { contextBudget: 9000 });
   assert.equal(await agent.run('inspect'), 'done');
   const projected = model.finalContext.filter(item => item.role === 'tool');
   assert.equal(projected.length, 3);
