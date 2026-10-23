@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { PrivateKeyStreamRedactor } from './private-keys.ts';
 import { redactSecrets, SECRET_LABELS, SECRET_MARKERS, TRAILING_LABELED_VALUE } from './secrets.ts';
 
 const LOCAL_ROOTS = ['Users', 'home', 'private', 'var', 'tmp', 'Volumes', 'etc', 'opt', 'System', 'Library', 'Applications'];
@@ -22,9 +23,10 @@ export function safeOutput(text: string, workspace: string, aliases: string[] = 
   return redactSecrets(result.replace(LOCAL_PATH, '[local path]'));
 }
 
-// Hold any suffix that could still become a private path when the next delta arrives.
+// Remove PEM blocks before applying the path and single-line credential filters.
 export class SafeOutputStream {
   private pending = '';
+  private readonly privateKeys = new PrivateKeyStreamRedactor();
   private readonly paths: string[];
   private readonly workspace: string;
   private readonly emit: (text: string) => void;
@@ -40,6 +42,10 @@ export class SafeOutputStream {
   }
 
   write(delta: string): void {
+    this.writeFiltered(this.privateKeys.write(delta));
+  }
+
+  private writeFiltered(delta: string): void {
     this.pending += delta;
     let held = 0;
     for (const source of this.paths) {
@@ -85,6 +91,7 @@ export class SafeOutputStream {
   }
 
   finish(): void {
+    this.writeFiltered(this.privateKeys.finish());
     if (this.pending) {
       const complete = this.paths.includes(this.pending);
       this.emit(this.heldSecret
